@@ -15,9 +15,11 @@ Result<ProcrustesResult> align(const Eigen::MatrixXd& y, const Eigen::MatrixXd& 
     }
 
     // M = y' * reference (k x k); SVD M = U S V', R* = U V' (ADR §6.2,
-    // which specifically names BDCSVD).
+    // which specifically names BDCSVD). This Eigen version deprecates
+    // passing compute options to the constructor - they're a template
+    // parameter now.
     Eigen::MatrixXd m = y.transpose() * reference;
-    Eigen::BDCSVD<Eigen::MatrixXd> svd(m, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    Eigen::BDCSVD<Eigen::MatrixXd, Eigen::ComputeFullU | Eigen::ComputeFullV> svd(m);
     if (svd.info() != Eigen::Success) {
         return tl::unexpected(
             gm::Error::make(gm::ErrorCode::kNumericFailure, "Procrustes SVD failed to converge"));
