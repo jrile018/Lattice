@@ -204,7 +204,15 @@ int main(int argc, char** argv) {
             }
         }
 
-        ImGui::Begin("gm-view");
+        // AlwaysAutoResize, not the default: ImGui only auto-fits a
+        // window's size once, on its very first frame - without this
+        // flag, the control panel stays frozen at whatever it measured
+        // before data finished loading (just the run selector, before
+        // the frame slider/Play button/regime plot exist), and the
+        // rest of the content silently clips instead of the window
+        // growing to show it. Found by actually screenshotting the
+        // running app, not by reading the ImGui docs and assuming.
+        ImGui::Begin("gm-view", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
         ImGui::Text("Runs (%s)", runs_base_dir.c_str());
         if (state.runs.empty()) {
             ImGui::TextDisabled("No runs found - run gm-run first.");
