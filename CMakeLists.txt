@@ -104,7 +104,9 @@ add_subdirectory(apps/gm-backtest)
 add_subdirectory(apps/gm-report)
 add_subdirectory(apps/gm-run)
 
-# M1+: apps/gm-sweep, apps/gm-view; libs/gm-io, gm-data, gm-features(math),
+add_subdirectory(apps/gm-view)
+
+# M1+: apps/gm-sweep; libs/gm-features(math),
 # gm-geometry(math), gm-boundaries(math), gm-topology, gm-signals(math),
 # gm-backtest(math), gm-plot.
 
