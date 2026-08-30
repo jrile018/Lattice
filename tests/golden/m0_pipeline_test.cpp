@@ -38,19 +38,13 @@ constexpr std::array<const char*, 8> kExpectedStages = {
     "gm-boundaries", "gm-signals", "gm-backtest", "gm-report",
 };
 
-// gm-universe graduated from an M0 stub to a real M1 implementation; the
-// other 7 have not yet (see ADR.md §13 milestones). This set is what
-// makes this one golden test track the pipeline's incremental rollout
-// instead of needing a rewrite every time a stage graduates - each
-// stage's artifact check just needs to know which column it's in.
-constexpr std::array<const char*, 1> kGraduatedStages = {"gm-universe"};
-
-bool is_graduated(const char* stage) {
-    for (const char* g : kGraduatedStages) {
-        if (std::string_view{g} == stage) return true;
-    }
-    return false;
-}
+// gm-universe and gm-ingest graduated from M0 stubs to real M1
+// implementations; the other 6 have not yet (see ADR.md §13
+// milestones). The per-stage artifact check below just needs to know
+// which real file each graduated stage produces instead of a
+// `<stage>.stub.json` placeholder - this is what lets one golden test
+// track the pipeline's incremental rollout without a rewrite each time
+// another stage graduates.
 
 int normalized_exit_code(int system_result) {
 #if defined(_WIN32)
@@ -104,9 +98,10 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
             CHECK(stage_manifest->stage() == stage);
             CHECK(stage_manifest->raw().value("status", "") == "ok");
 
-            if (is_graduated(stage)) {
-                // gm-universe: real artifact, checked in detail below.
+            if (std::string_view{stage} == "gm-universe") {
                 CHECK(std::filesystem::exists(run_dir / stage / "universe.parquet"));
+            } else if (std::string_view{stage} == "gm-ingest") {
+                CHECK(std::filesystem::exists(run_dir / stage / "prices.parquet"));
             } else {
                 std::filesystem::path stub_artifact =
                     run_dir / stage / (std::string{stage} + ".stub.json");
@@ -125,6 +120,22 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
         // real* end to end through the actual gm-run subprocess chain.
         REQUIRE(universe_manifest->raw().contains("rows_written"));
         CHECK(universe_manifest->raw()["rows_written"].get<std::int64_t>() > 1000);
+    }
+
+    SECTION("gm-ingest fetched and validated real prices for the fixture's 10 tickers") {
+        auto ingest_manifest = gm::Manifest::read(run_dir / "gm-ingest" / "manifest.json");
+        REQUIRE(ingest_manifest.has_value());
+
+        REQUIRE(ingest_manifest->raw().contains("tickers_requested"));
+        CHECK(ingest_manifest->raw()["tickers_requested"].get<std::int64_t>() == 10);
+        // At least most of a random 10-name sample from the S&P 500
+        // should fetch and pass validation against a live source - a
+        // handful of rejections wouldn't be surprising (an illiquid
+        // day, a name Yahoo doesn't recognize under this symbol) but a
+        // near-total failure means the fetch or the screens are broken,
+        // not that the market had a bad month.
+        CHECK(ingest_manifest->raw()["tickers_ok"].get<std::int64_t>() >= 7);
+        CHECK(ingest_manifest->raw()["rows_written"].get<std::int64_t>() > 0);
     }
 
     std::filesystem::remove_all(run_dir);

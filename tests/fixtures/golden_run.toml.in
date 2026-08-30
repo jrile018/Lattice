@@ -19,3 +19,14 @@ snapshot_csv = "@GM_REPO_ROOT@/data/reference/sp500_constituents.csv"
 # larger run on the remote box, not something re-run on every test pass.
 start_date = "2024-01-02"
 end_date = "2024-01-31"
+
+[ingest]
+# The "10-ticker golden fixture" named in ADR.md §13's M1 exit criterion.
+# NOTE: this makes the golden test genuinely network-dependent (real
+# fetches against Yahoo's chart endpoint, ADR §7.2) - a deliberate,
+# documented exception to gm-io's own unit tests staying hermetic
+# (libs/gm-io/tests/http_cache_test.cpp), because "does ingestion
+# actually work end to end" is exactly what this milestone's exit
+# criterion is asking to prove.
+max_tickers = 10
+cache_dir = "@GM_REPO_ROOT@/data/raw/price_cache"
