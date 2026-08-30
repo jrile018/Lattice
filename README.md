@@ -23,18 +23,29 @@ generator, not Ninja, so a from-scratch box needs no extra package
 beyond what's in the table above. If `ninja` happens to be installed,
 nothing stops you from adding a Ninja preset locally.
 
-**Linux note on flex/bison:** Arrow's Parquet support depends on Thrift,
-which needs `flex` and `bison` to build from source. If they are not
-installed system-wide and you don't have root, they can be fetched
-without root via `apt-get download flex bison libfl-dev libfl2 m4` and
-extracted locally with `dpkg -x <deb> <prefix>`. Put `<prefix>/usr/bin`
-on `PATH` **and** export `BISON_PKGDATADIR=<prefix>/usr/share/bison`
-before running `vcpkg install` — bison hardcodes `/usr/share/bison` at
-compile time and does not locate its own data files relative to its
-binary, so without the env var it fails with `m4sugar.m4: cannot open`
-partway through Thrift's build. (This is exactly how the project's
-remote build box — no sudo — is set up; see the M0 session notes in git
-history if you need the literal commands.)
+**Linux note on build tooling without root:** several ports (Thrift, for
+Arrow's Parquet support; glfw3's X11 backend) need build-time tools that
+are not always present and are easy to get wrong without root:
+
+- `flex` + `bison` — if missing, `apt-get download flex bison libfl-dev
+  libfl2 m4` and extract each with `dpkg -x <deb> <prefix>` (no root
+  needed for download-only + local extraction). Put `<prefix>/usr/bin`
+  on `PATH` **and** export `BISON_PKGDATADIR=<prefix>/usr/share/bison` —
+  bison hardcodes `/usr/share/bison` at compile time and does not locate
+  its data files relative to its own binary, so without the env var it
+  fails with `m4sugar.m4: cannot open` partway through Thrift's build.
+- `autoconf` + `automake` + `libtool` (+ `autoconf-archive`) — same
+  `apt-get download` + `dpkg -x` approach for packages `autoconf
+  automake libtool libtool-bin autoconf-archive autotools-dev`. Export
+  `ACLOCAL_PATH=<prefix>/usr/share/aclocal:<prefix>/usr/share/aclocal-1.16`
+  so `aclocal`/`autoreconf` find autoconf-archive's macros (e.g.
+  `AX_CHECK_COMPILE_FLAG`, used by glfw3's `pthread-stubs` dependency) —
+  without it, `autoreconf` fails with "possibly undefined macro" or
+  `vcpkg_run_autoreconf` fails outright asking you to `apt install`
+  packages that don't need installing, only extracting.
+
+(This is exactly how the project's remote build box — no sudo — is set
+up; see the M0 session notes in git history for the literal commands.)
 
 ## Building
 
