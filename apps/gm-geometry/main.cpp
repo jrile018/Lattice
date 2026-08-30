@@ -11,6 +11,7 @@
 // if no liquidity ranking was configured (e.g. this milestone's golden
 // fixture, whose [ingest] section has no liquidity_top_n).
 
+#include <gm-core/calendar.hpp>
 #include <gm-core/stage_main.hpp>
 #include <gm-geometry/correlation.hpp>
 #include <gm-geometry/distance.hpp>
@@ -48,6 +49,55 @@ gm::Result<std::vector<std::string>> load_ticker_universe(const std::filesystem:
     if (!ticker_col) return tl::unexpected(ticker_col.error());
     std::set<std::string> unique(ticker_col->begin(), ticker_col->end());
     return std::vector<std::string>(unique.begin(), unique.end());
+}
+
+struct HistoryFilterResult {
+    std::vector<std::string> retained;
+    std::vector<std::string> excluded_short_history;
+};
+
+/// Drops any requested ticker whose price data doesn't begin on or
+/// before `cutoff` - discovered necessary the hard way (ADR §3
+/// principle 1 - found via this milestone's own real 16-year run, not
+/// a unit test): the panel's usable date range is the INTERSECTION of
+/// every selected ticker's coverage (build_return_panel below never
+/// forward-fills), so a single recently-listed high-liquidity name
+/// (e.g. a 2025 spin-off) silently collapsed a requested 16-year
+/// analysis down to the ~1.5 years since that one ticker started
+/// trading. Excluding short-history tickers up front - rather than
+/// letting one late joiner define everyone's range - is a deliberate
+/// scope decision, not a full time-varying-membership system (that is
+/// real added complexity: correctly Procrustes-aligning frames whose
+/// ticker SETS differ, not just their count, deserves its own design
+/// pass rather than a rushed addition here). Reported via
+/// excluded_short_history so it's visible in the manifest, not silent.
+HistoryFilterResult filter_tickers_with_sufficient_history(const gm::io::Table& prices,
+                                                             const std::vector<std::string>& tickers,
+                                                             const gm::Date& cutoff) {
+    auto ticker_col = prices.string_column("ticker");
+    auto date_col = prices.string_column("date");
+    // Both columns are guaranteed present by this point (build_return_panel
+    // already validated them via the same accessors on the same table).
+
+    std::map<std::string, std::string> first_date_by_ticker;
+    for (std::size_t i = 0; i < ticker_col->size(); ++i) {
+        const std::string& t = (*ticker_col)[i];
+        const std::string& d = (*date_col)[i];
+        auto it = first_date_by_ticker.find(t);
+        if (it == first_date_by_ticker.end() || d < it->second) first_date_by_ticker[t] = d;
+    }
+
+    std::string cutoff_iso = cutoff.to_iso();  // ISO-8601 dates compare correctly as strings
+    HistoryFilterResult result;
+    for (const auto& t : tickers) {
+        auto it = first_date_by_ticker.find(t);
+        if (it != first_date_by_ticker.end() && it->second <= cutoff_iso) {
+            result.retained.push_back(t);
+        } else {
+            result.excluded_short_history.push_back(t);
+        }
+    }
+    return result;
 }
 
 struct ReturnPanel {
@@ -150,7 +200,52 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     auto prices = gm::io::read_parquet(ingest_dir / "prices.parquet");
     if (!prices) return tl::unexpected(prices.error());
 
-    auto panel = build_return_panel(*prices, *tickers);
+    // Filter out tickers whose data doesn't cover the requested range's
+    // start - see filter_tickers_with_sufficient_history's comment for
+    // why this is necessary at all (a single late-joining ticker
+    // otherwise collapses the panel's usable range for everyone).
+    // universe.start_date is the same key gm-universe itself reads;
+    // reused here rather than inventing a separate geometry-specific
+    // config knob for the same underlying date.
+    auto start_date_str = config.get_string("universe.start_date");
+    if (!start_date_str) return tl::unexpected(start_date_str.error());
+    auto start_date = gm::Date::parse_iso(*start_date_str);
+    if (!start_date) {
+        return tl::unexpected(gm::Error::make(gm::ErrorCode::kInvalidArgument,
+                                               "universe.start_date is not a valid ISO date",
+                                               *start_date_str));
+    }
+    gm::NyseCalendar calendar_for_cutoff;
+    // One window's worth of trading-day grace: a ticker that starts a
+    // handful of days into the requested range (e.g. the range begins
+    // on a date that isn't that ticker's exact first trade) still
+    // contributes to nearly every frame; only genuinely late joiners
+    // (months to years in) get excluded.
+    gm::Date history_cutoff = calendar_for_cutoff.add_trading_days(*start_date, window_days);
+
+    auto filtered = filter_tickers_with_sufficient_history(*prices, *tickers, history_cutoff);
+    if (filtered.retained.empty()) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kValidationFailure,
+            "every requested ticker was excluded for insufficient history",
+            "cutoff=" + history_cutoff.to_iso()));
+    }
+    manifest.set_int("num_tickers_excluded_short_history",
+                      static_cast<std::int64_t>(filtered.excluded_short_history.size()));
+    if (static_cast<std::int64_t>(filtered.retained.size()) < k) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kValidationFailure,
+            "fewer than geometry.embedding_dims tickers remain after the history filter",
+            std::to_string(filtered.retained.size()) + " remain, k=" + std::to_string(k)));
+    }
+    // Everything from here on uses filtered.retained, NOT the original
+    // `tickers` - they can differ in both size and order after
+    // filtering, and every downstream index (the embedding matrix's
+    // rows, output ticker labels) must agree with whichever list
+    // build_return_panel was actually given.
+    const std::vector<std::string>& active_tickers = filtered.retained;
+
+    auto panel = build_return_panel(*prices, active_tickers);
     if (!panel) return tl::unexpected(panel.error());
 
     Eigen::Index total_t = panel->returns.rows();
@@ -207,7 +302,7 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
 
         for (Eigen::Index i = 0; i < n; ++i) {
             out_dates.push_back(frame_date);
-            out_tickers.push_back((*tickers)[static_cast<std::size_t>(i)]);
+            out_tickers.push_back(active_tickers[static_cast<std::size_t>(i)]);
             out_x.push_back(aligned(i, 0));
             out_y.push_back(k >= 2 ? aligned(i, 1) : 0.0);
             out_z.push_back(k >= 3 ? aligned(i, 2) : 0.0);
@@ -235,7 +330,7 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     if (!write2) return tl::unexpected(write2.error());
 
     manifest.set_int("num_frames", static_cast<std::int64_t>(regime_table.num_rows()));
-    manifest.set_int("num_tickers", static_cast<std::int64_t>(tickers->size()));
+    manifest.set_int("num_tickers", static_cast<std::int64_t>(active_tickers.size()));
     manifest.set_int("rows_written", static_cast<std::int64_t>(geometry_table.num_rows()));
     manifest.set_int("window_days", window_days);
     manifest.set_int("embedding_dims", k);
