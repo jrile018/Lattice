@@ -67,6 +67,17 @@ std::string quote_arg(const std::string& s) {
 /// std::system()'s return value encodes the child's exit code
 /// differently on POSIX (via wait-status macros) vs Windows (the raw
 /// exit code) - normalize it here so callers see one convention.
+///
+/// Windows note: system_result IS the child's exit code directly (no
+/// wait-status decoding needed), including for an abnormally-terminated
+/// process - Windows exit codes for crashes are large unsigned values
+/// (e.g. an unhandled SEH exception) that show up here as a big non-zero
+/// int, which the caller already treats as failure. There is no separate
+/// "-1 means the shell itself failed to launch" case to special-case
+/// the way POSIX has one; std::system on Windows returns -1 for that
+/// same condition, so a -1 here is unambiguous (unlike POSIX, where -1
+/// can also arise from a signal-terminated child mapped through
+/// wait-status macros before this function is called).
 int normalized_exit_code(int system_result) {
 #if defined(_WIN32)
     return system_result;

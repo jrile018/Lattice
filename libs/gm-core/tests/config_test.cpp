@@ -74,6 +74,23 @@ TEST_CASE("wrong-typed key access fails rather than coercing", "[config]") {
     REQUIRE_FALSE(wrong_type.has_value());
 }
 
+TEST_CASE("int/double coercion is rejected in both directions", "[config]") {
+    // ADR-005's entire case for TOML over YAML is "no implicit type
+    // coercion" - verify that holds both ways, not just one. toml++
+    // stores TOML's integer and float as genuinely distinct node types,
+    // so this should hold; if it didn't, that would itself be an
+    // ADR-005 violation at the wrapper level, not just a test gap.
+    auto cfg = Config::parse("int_val = 42\nfloat_val = 3.14");
+    REQUIRE(cfg.has_value());
+
+    CHECK_FALSE(cfg->get_double("int_val").has_value());
+    CHECK_FALSE(cfg->get_int("float_val").has_value());
+
+    // Sanity: each reads correctly as its own actual type.
+    CHECK(cfg->get_int("int_val").value_or(-1) == 42);
+    CHECK(cfg->get_double("float_val").value_or(-1.0) == 3.14);
+}
+
 TEST_CASE("_or accessors fall back on missing keys", "[config]") {
     auto cfg = Config::parse(kSample);
     REQUIRE(cfg.has_value());
