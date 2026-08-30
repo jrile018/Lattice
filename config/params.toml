@@ -1,0 +1,27 @@
+# Default full-scale run parameters (ADR.md §8.1). Distinct from
+# tests/fixtures/golden_run.toml.in, which is deliberately small/fast
+# for CI - this is the real M1 exit-criterion run: "15-year, 100-name
+# validated price panel builds locally; coverage stats reported."
+#
+# Paths here are relative to wherever gm-run is invoked from (the repo
+# root, by convention) rather than CMake-templated, since this file is
+# meant to be run by a human/script directly, not compiled into a test.
+
+[output]
+runs_base_dir = "runs"
+
+[universe]
+snapshot_csv = "data/reference/sp500_constituents.csv"
+# 2010-01-04 is the earliest trading day this ADR's date range targets
+# (ADR-002); end_date is intentionally left a few days behind "today" to
+# avoid requesting a partial/not-yet-closed final bar.
+start_date = "2010-01-04"
+end_date = "2026-08-28"
+
+[ingest]
+cache_dir = "data/raw/price_cache"
+# No max_tickers cap: fetch the full S&P 500 base pool candidate set
+# (~503 names) so liquidity ranking below has the full field to select
+# from, not a pre-truncated slice.
+liquidity_window_days = 60
+liquidity_top_n = 100
