@@ -92,6 +92,7 @@ add_subdirectory(libs/gm-core)
 add_subdirectory(libs/gm-io)
 add_subdirectory(libs/gm-data)
 add_subdirectory(libs/gm-geometry)
+add_subdirectory(libs/gm-boundaries)
 
 add_subdirectory(apps/gm-universe)
 add_subdirectory(apps/gm-ingest)
