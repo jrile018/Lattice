@@ -31,6 +31,7 @@
 
 #include <gm-core/calendar.hpp>
 #include <gm-core/stage_main.hpp>
+#include <gm-data/liquidity.hpp>
 #include <gm-io/http_cache.hpp>
 #include <gm-io/parquet.hpp>
 #include <gm-io/table.hpp>
@@ -255,6 +256,44 @@ gm::VoidResult run_gm_ingest(const gm::Config& config, const std::filesystem::pa
 
     auto write_result = gm::io::write_parquet(combined, output_dir / "prices.parquet");
     if (!write_result) return tl::unexpected(write_result.error());
+
+    // Liquidity ranking (ADR-001: "top 100 by trailing 60-day median
+    // dollar volume") is computed from what was just fetched, not
+    // fetched separately - resolves the chicken-and-egg problem (ranking
+    // needs prices, but knowing what to fetch would otherwise need
+    // ranking) by writing it as a second, derived artifact rather than
+    // destructively filtering prices.parquet down before writing it.
+    // Optional: a config that only wants the raw validated panel (e.g.
+    // this milestone's 10-ticker golden fixture, which has too few
+    // names for "top 100" to mean anything) simply omits these keys.
+    if (config.has("ingest.liquidity_window_days") || config.has("ingest.liquidity_top_n")) {
+        std::int64_t window_days = config.get_int_or("ingest.liquidity_window_days", 60);
+        std::int64_t top_n = config.get_int_or("ingest.liquidity_top_n", 100);
+
+        auto ranked = gm::data::rank_by_liquidity(combined, static_cast<int>(window_days),
+                                                    static_cast<int>(top_n));
+        if (!ranked) return tl::unexpected(ranked.error());
+
+        gm::io::Table liquid;
+        std::vector<std::string> liquid_tickers;
+        std::vector<double> liquid_medians;
+        std::vector<std::int64_t> liquid_bars_used;
+        for (const auto& r : *ranked) {
+            liquid_tickers.push_back(r.ticker);
+            liquid_medians.push_back(r.median_dollar_volume);
+            liquid_bars_used.push_back(static_cast<std::int64_t>(r.bars_used));
+        }
+        liquid.add_string_column("ticker", std::move(liquid_tickers));
+        liquid.add_double_column("median_dollar_volume", std::move(liquid_medians));
+        liquid.add_int64_column("bars_used", std::move(liquid_bars_used));
+
+        auto liquid_write = gm::io::write_parquet(liquid, output_dir / "liquid_universe.parquet");
+        if (!liquid_write) return tl::unexpected(liquid_write.error());
+
+        manifest.set_int("liquid_universe_size", static_cast<std::int64_t>(ranked->size()));
+        manifest.set_int("liquidity_window_days", window_days);
+        manifest.set_int("liquidity_top_n", top_n);
+    }
 
     manifest.set_int("rows_written", static_cast<std::int64_t>(combined.num_rows()));
     manifest.set_int("tickers_requested", static_cast<std::int64_t>(tickers.size()));

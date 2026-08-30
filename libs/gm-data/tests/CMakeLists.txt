@@ -1,5 +1,6 @@
 add_executable(gm-data-tests
   universe_test.cpp
+  liquidity_test.cpp
 )
 
 target_link_libraries(gm-data-tests
