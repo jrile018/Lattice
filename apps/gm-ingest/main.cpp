@@ -67,10 +67,26 @@ struct TickerBars {
     std::int64_t gap_days_over_3 = 0;
 };
 
+/// Yahoo's chart endpoint uses a dash for dual-class share tickers
+/// (e.g. "BRK-B", "BF-B") where the S&P 500 snapshot - sourced from
+/// Wikipedia, ADR §7.1 - uses a dot ("BRK.B", "BF.B"). Found via this
+/// milestone's own real 503-ticker coverage report: both dotted names
+/// were failing with "missing timestamp/indicators" (BF.B) or an
+/// outright 404 (BRK.B), because Yahoo simply doesn't recognize the
+/// dotted form as a symbol at all. Translated only for the outbound
+/// request URL - `ticker` (the canonical, dotted form) is still what's
+/// written to every output column and used as the cache key, so this
+/// stays invisible to everything downstream of this one function.
+std::string to_yahoo_symbol(const std::string& ticker) {
+    std::string yahoo_ticker = ticker;
+    std::replace(yahoo_ticker.begin(), yahoo_ticker.end(), '.', '-');
+    return yahoo_ticker;
+}
+
 gm::Result<TickerBars> fetch_and_screen(gm::io::HttpCache& cache, const gm::NyseCalendar& calendar,
                                          const std::string& ticker, const gm::Date& start,
                                          const gm::Date& end) {
-    std::string url = "https://query1.finance.yahoo.com/v8/finance/chart/" + ticker +
+    std::string url = "https://query1.finance.yahoo.com/v8/finance/chart/" + to_yahoo_symbol(ticker) +
                        "?period1=" + std::to_string(date_to_epoch_seconds_midnight_utc(start)) +
                        "&period2=" +
                        std::to_string(date_to_epoch_seconds_midnight_utc(end) + 86400) +
