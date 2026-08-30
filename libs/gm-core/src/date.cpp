@@ -42,7 +42,14 @@ std::optional<Date> Date::parse_iso(std::string_view yyyy_mm_dd) {
 }
 
 std::string Date::to_iso() const {
-    char buf[11];  // "YYYY-MM-DD\0"
+    // Sized for GCC's -Wformat-truncation worst case, not just "YYYY-MM-DD\0":
+    // the analyzer sees %d/%u on int/unsigned and assumes their full type
+    // range (up to 11 digits for a negative int), even though date::year
+    // and date::month are runtime-bounded to sane calendar values. A
+    // generously oversized stack buffer satisfies the analyzer without
+    // weakening any actual validation - Date only ever holds values that
+    // came from a real civil calendar date to begin with.
+    char buf[64];
     auto y = ymd();
     std::snprintf(buf, sizeof(buf), "%04d-%02u-%02u", int{y.year()}, unsigned{y.month()},
                   unsigned{y.day()});

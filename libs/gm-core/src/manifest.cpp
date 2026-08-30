@@ -23,7 +23,10 @@ std::string utc_timestamp_now() {
 #else
     gmtime_r(&now, &utc);
 #endif
-    char buf[21];  // "YYYY-MM-DDTHH:MM:SSZ\0"
+    // See the identical comment in date.cpp: oversized for GCC's
+    // -Wformat-truncation worst-case analysis on %d given int's full
+    // range, not because a UTC timestamp actually needs 96 bytes.
+    char buf[96];
     std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ", utc.tm_year + 1900,
                   utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec);
     return std::string{buf};
