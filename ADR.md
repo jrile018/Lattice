@@ -392,23 +392,31 @@ Exit: `|z| < z_exit` (default 0.5), or horizon stop at 3× half-life, or hard ad
 
 | Source | Access | Cost | Notes |
 |---|---|---|---|
-| S&P 500 list + change history | `en.wikipedia.org/wiki/List_of_S%26P_500_companies` | Free | The change table makes point-in-time reconstruction possible without a vendor. Snapshot once into `data/reference/`; never re-scrape per run. |
-| Nasdaq-100 membership | Wikipedia / Nasdaq | Free | Same approach. |
+| S&P 500 current constituents + join date | `en.wikipedia.org/wiki/List_of_S%26P_500_companies` | Free | **Amended during M1 (2026-08-30).** The ADR originally assumed this page carries a separate "changes" table (additions/removals with dates) sufficient for full point-in-time reconstruction. As of the live page fetched during M1, that table is no longer present — verified by direct fetch, not assumed from memory (`data/raw/sp500_wikipedia.html`, retrieved 2026-08-30). What the page *does* still provide, and what M1 actually uses: a 503-row current-constituent table with a `Date added` column per member, snapshotted to `data/reference/sp500_constituents.csv`. This answers "was ticker X a member on date D" correctly for any name still in the index today (`D >= date_added`). It cannot answer that question for a name that was **removed** from the index before today — that gap is real, but it is not new: it is the same survivorship gap ADR-016 already scoped and already assigned to a paid point-in-time source (Sharadar/Norgate/CRSP) as a later-phase decision. This finding sharpens ADR-016's estimate rather than contradicting it. |
+| Nasdaq-100 membership | ~~Wikipedia~~ deferred | Free (source TBD) | **Amended during M1.** Same live-fetch check found no components table on the current Nasdaq-100 Wikipedia page either (no dedicated "List of Nasdaq-100 companies" article exists as a fallback). Rather than force a fragile scrape against a page that clearly reorganizes over time, this is deferred: **M1's base pool is S&P 500 current constituents only**, explicitly narrower than ADR-001's original `S&P 500 ∪ Nasdaq-100 ∪ manual list`. Nasdaq's own official listings page is the more likely durable free source and is the next thing to try when this is revisited, not another Wikipedia scrape. |
 | Ticker → CIK map | `www.sec.gov/files/company_tickers.json` | Free | Official; handles ticker changes; joins prices to filings. |
 | Liquidity ranking | Computed | Free | Trailing 60-day median dollar volume from the price panel itself. |
 
-### 7.2 Prices — **C++-driven source ordering (a real remodel change)**
+### 7.2 Prices — **C++-driven source ordering (a real remodel change, amended again during M1)**
 
-The Python design used `yfinance` (Yahoo primary). `yfinance` exists to negotiate Yahoo's unofficial crumb/cookie/session dance; reimplementing that dance in C++ is fragile maintenance against an undocumented target. A senior call: **make the trivially-fetchable source primary.**
+The Python design used `yfinance` (Yahoo primary). `yfinance` exists to negotiate Yahoo's unofficial crumb/cookie/session dance; reimplementing that dance in C++ is fragile maintenance against an undocumented target. A senior call: **make the trivially-fetchable source primary.** At the C++ remodel, that meant demoting Yahoo below Stooq.
+
+**Amended during M1 (2026-08-30), verified by direct fetch, not assumed:** Stooq's `/q/d/l/` CSV endpoint now serves a client-side JavaScript proof-of-work challenge (a SHA-256 hashcash script) before returning any content. This blocks every plain HTTP client uninformly — `curl`, and identically `cpr::Get` from our own C++ code — not a `cpr`-specific gap. There is no lightweight fix: solving it requires executing JavaScript, which means a real or headless browser, which is out of scope for a compiled HTTP client. Stooq is therefore **not usable as the primary source** as designed, full stop, regardless of implementation language.
+
+Meanwhile, Yahoo's unofficial chart JSON endpoint — the one explicitly demoted to "tertiary spot-checks only" specifically because it was expected to be the fragile one — was fetched directly and works cleanly with a plain `curl`/`cpr::Get`: no auth, no cookies, no JS challenge. A single request with `period1`/`period2` query params returned 4,189 daily bars for AAPL spanning 2010-01-04 through 2026-08-28 (`open`/`high`/`low`/`close`/`volume` plus a separate `adjclose` series), which is the entire history this project needs in one call per ticker.
+
+**Revised ordering for M1 onward:**
 
 | Source | Access | Cost | Role |
 |---|---|---|---|
-| **Stooq** | `stooq.com/q/d/l/?s=aapl.us&i=d` — plain CSV over HTTPS, no auth | Free | **Primary.** One `cpr::Get` per ticker; stable URL scheme for years. |
-| **Tiingo** | REST + free API key, documented JSON | Free tier | **Secondary/validator.** Clean adjusted EOD; independent lineage from Stooq. Rate-limited — cache hard. |
-| Yahoo chart endpoint | `query1.finance.yahoo.com/v8/finance/chart/…` JSON | Free | **Tertiary spot-checks only.** Unofficial; expect breakage; never load-bearing. |
+| **Yahoo chart endpoint** | `query1.finance.yahoo.com/v8/finance/chart/{ticker}?period1=…&period2=…&interval=1d&events=div,splits` — JSON, no auth | Free | **Primary**, promoted from tertiary. Verified working via plain HTTP; one request per ticker covers the full 2010-present range. Unofficial and undocumented, so gm-ingest's ADR-015 validation screens are the safety net, not a nice-to-have — this is exactly the kind of source that can break without notice. |
+| Stooq | `stooq.com/q/d/l/` CSV | Free, but **currently blocked** by a JS proof-of-work challenge | **Demoted, not removed.** gm-io's CSV parser (already built) is ready for it the moment this is resolved (a different endpoint, a solved-challenge proxy, or Stooq relaxing the check) or for any other CSV-shaped free source found later. Not load-bearing for M1. |
+| **Tiingo** | REST + free API key, documented JSON | Free tier | **Secondary/validator**, unchanged in role — still the intended independent-lineage cross-check against Yahoo (ADR-015) once a free API key is obtained. Not yet wired into M1's ingest run; the two-source validation requirement is real and open, tracked as an M1 follow-up rather than silently dropped. |
 | Alpaca | REST, free tier (IEX feed) | Free | Only relevant if this ever goes live for execution. |
 | Polygon.io | REST | Paid — verify pricing | The intraday upgrade path, if ever. |
 | Sharadar SEP (Nasdaq Data Link) | REST | Paid — verify pricing | The survivorship fix (ADR-016), phase 5. |
+
+This is the second live-fetch-contradicts-the-plan finding in the same M1 session (the first being §7.1's Wikipedia changes table). Both are recorded here rather than silently worked around, per the project's own engineering principles (§3): a design doc that quietly stops matching reality is worse than one that gets corrected in the open.
 
 ### 7.3 Fundamentals & identity — the "learn about it" panel
 
@@ -559,7 +567,7 @@ Performance contract: < 1 ms frame decode from the mapped run directory; 60 fps 
 | Survivorship bias inflates backtests | High | ADR-016: point-in-time membership; residual bias measured and reported |
 | Overfitting the parameter space | High | ADR-014 walk-forward + DSR + automatic trial counting |
 | Bad tick fabricates a dislocation | Medium | ADR-015 two-source validation + screens + timestamped cache |
-| Source breakage (esp. anything Yahoo) | Medium | Stooq primary, Tiingo secondary, Yahoo demoted to spot-checks (§7.2) |
+| Source breakage (esp. anything unofficial) | Medium-High | Yahoo chart endpoint is primary and unofficial (§7.2, revised M1) — the ADR-015 validation screens are the real defense here, not source diversity, since Stooq (the intended primary) is currently blocked outright and Tiingo isn't wired in yet |
 | FastMCD implementation difficulty | Medium | Phase-1 stand-in (shrunk covariance + MAD); MCD is its own milestone with published reference tests |
 | Crowding — residual reversion is well-trodden | Medium | Thin-margin expectation; costs modeled from day one |
 | Viewer scope creep | Medium | Performance contract + four fixed tabs; anything else is phase 4+ |
