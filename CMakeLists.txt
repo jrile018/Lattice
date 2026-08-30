@@ -11,9 +11,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# All stage executables land in one directory so gm-run can find its
+# siblings by "the directory I was launched from" (apps/gm-run/main.cpp)
+# without a separate install step, and so this matches the deployable
+# bin/ layout used by `install(TARGETS ... RUNTIME DESTINATION bin)`
+# (cmake/GmStageApp.cmake).
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+foreach(config_type ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER ${config_type} config_type_upper)
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${config_type_upper} ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+
 option(GM_BUILD_TESTS "Build unit/golden/property tests" ON)
 option(GM_BUILD_BENCHMARKS "Build google-benchmark suites" ON)
 option(GM_SANITIZE "Build with ASan+UBSan (Linux/GCC only)" OFF)
+
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+include(GmBuildInfo)
+include(GmStageApp)
 
 # ---------------------------------------------------------------------------
 # ADR-004/ADR-019: strict floating-point conformance, no fast-math, ever.
