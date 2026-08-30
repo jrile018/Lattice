@@ -25,3 +25,7 @@ cache_dir = "data/raw/price_cache"
 # from, not a pre-truncated slice.
 liquidity_window_days = 60
 liquidity_top_n = 100
+
+[geometry]
+window_days = 60
+embedding_dims = 3

@@ -15,6 +15,7 @@ add_executable(gm-golden-tests
 target_link_libraries(gm-golden-tests
   PRIVATE
     gm::core
+    gm::io
     Catch2::Catch2WithMain
 )
 

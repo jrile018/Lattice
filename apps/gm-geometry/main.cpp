@@ -1,43 +1,249 @@
-// gm-geometry: Correlation -> distance -> MDS -> Procrustes (ADR-009, ADR-010)
+// gm-geometry: correlation -> Ledoit-Wolf shrinkage -> RMT denoising ->
+// Mantegna distance -> classical MDS -> Procrustes alignment, applied
+// on a rolling window across the full price history (ADR-009/ADR-010,
+// ADR §6.1-6.2, ADR §13 M2: "geometry artifacts for full history in
+// <60s locally; structural change metric spikes at known events").
 //
-// M0 STUB. This stage does not yet do real work - it exists so the full
-// chain (gm-run) wires end-to-end and produces a trivial artifact on
-// both build platforms, per the M0 exit criterion in ADR.md §13. The
-// real implementation lands in the milestone named in the description
-// above (see ADR.md for which one).
+// Reads gm-ingest's upstream artifacts (sibling stage directory, same
+// convention as gm-ingest reading gm-universe's output): prefers
+// liquid_universe.parquet for the ticker set (ADR-001's top-N-by-
+// liquidity selection) and falls back to every ticker in prices.parquet
+// if no liquidity ranking was configured (e.g. this milestone's golden
+// fixture, whose [ingest] section has no liquidity_top_n).
 
 #include <gm-core/stage_main.hpp>
+#include <gm-geometry/correlation.hpp>
+#include <gm-geometry/distance.hpp>
+#include <gm-geometry/mds.hpp>
+#include <gm-geometry/procrustes.hpp>
+#include <gm-geometry/rmt.hpp>
+#include <gm-geometry/shrinkage.hpp>
+#include <gm-io/parquet.hpp>
+#include <gm-io/table.hpp>
 
-#include <fstream>
+#include <Eigen/Dense>
+
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <set>
 
 namespace {
 
-gm::VoidResult run_gm_geometry(const gm::Config& /*config*/, const std::filesystem::path& output_dir,
-                           gm::Manifest& manifest) {
-    std::error_code ec;
-    std::filesystem::create_directories(output_dir, ec);
-    if (ec) {
-        return tl::unexpected(gm::Error::make(gm::ErrorCode::kIoFailure,
-                                               "failed to create output directory",
-                                               output_dir.string()));
+gm::Result<std::vector<std::string>> load_ticker_universe(const std::filesystem::path& ingest_dir) {
+    auto liquid = gm::io::read_parquet(ingest_dir / "liquid_universe.parquet");
+    if (liquid) {
+        auto tickers = liquid->string_column("ticker");
+        if (!tickers) return tl::unexpected(tickers.error());
+        std::vector<std::string> result(tickers->begin(), tickers->end());
+        std::sort(result.begin(), result.end());
+        return result;
     }
 
-    std::filesystem::path stub_path = output_dir / "gm-geometry.stub.json";
-    std::ofstream out(stub_path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        return tl::unexpected(gm::Error::make(gm::ErrorCode::kIoFailure,
-                                               "failed to write stub artifact", stub_path.string()));
-    }
-    out << "{\n  \"stage\": \"gm-geometry\",\n  \"status\": \"stub\",\n"
-        << "  \"note\": \"M0 skeleton - see ADR.md milestones for real implementation\"\n}\n";
+    // No liquidity ranking was configured for this run - fall back to
+    // every ticker gm-ingest actually wrote to prices.parquet.
+    auto prices = gm::io::read_parquet(ingest_dir / "prices.parquet");
+    if (!prices) return tl::unexpected(prices.error());
+    auto ticker_col = prices->string_column("ticker");
+    if (!ticker_col) return tl::unexpected(ticker_col.error());
+    std::set<std::string> unique(ticker_col->begin(), ticker_col->end());
+    return std::vector<std::string>(unique.begin(), unique.end());
+}
 
-    manifest.set_string("stub_artifact", stub_path.string());
-    manifest.set_int("rows_written", 0);
+struct ReturnPanel {
+    Eigen::MatrixXd returns;        // T x N log returns, ascending by date
+    std::vector<std::string> dates; // T+1 dates the returns were computed between;
+                                     // returns.row(i) is the return from dates[i] to dates[i+1]
+};
+
+/// Builds a rectangular log-return panel for exactly `tickers` (in that
+/// order) from gm-ingest's long-format prices.parquet. A date is
+/// included only if EVERY requested ticker has an adjclose value for
+/// it (an intersection, not a union) - the alternative (forward-filling
+/// a missing ticker-day) would quietly fabricate a return that never
+/// happened, which is worse than dropping the day.
+gm::Result<ReturnPanel> build_return_panel(const gm::io::Table& prices,
+                                            const std::vector<std::string>& tickers) {
+    auto ticker_col = prices.string_column("ticker");
+    if (!ticker_col) return tl::unexpected(ticker_col.error());
+    auto date_col = prices.string_column("date");
+    if (!date_col) return tl::unexpected(date_col.error());
+    auto adjclose_col = prices.double_column("adjclose");
+    if (!adjclose_col) return tl::unexpected(adjclose_col.error());
+
+    std::set<std::string> wanted(tickers.begin(), tickers.end());
+    // ticker -> date -> adjclose
+    std::map<std::string, std::map<std::string, double>> by_ticker;
+    for (std::size_t i = 0; i < ticker_col->size(); ++i) {
+        if (wanted.count((*ticker_col)[i]) == 0) continue;
+        by_ticker[(*ticker_col)[i]][(*date_col)[i]] = (*adjclose_col)[i];
+    }
+
+    for (const auto& t : tickers) {
+        if (by_ticker.find(t) == by_ticker.end()) {
+            return tl::unexpected(gm::Error::make(gm::ErrorCode::kNotFound,
+                                                   "requested ticker has no price data", t));
+        }
+    }
+
+    // Intersection of every requested ticker's date set.
+    std::set<std::string> common;
+    {
+        const auto& first = by_ticker.at(tickers.front());
+        for (const auto& [d, _] : first) common.insert(d);
+    }
+    for (std::size_t i = 1; i < tickers.size(); ++i) {
+        std::set<std::string> next;
+        const auto& this_ticker_dates = by_ticker.at(tickers[i]);
+        for (const auto& d : common) {
+            if (this_ticker_dates.count(d) > 0) next.insert(d);
+        }
+        common = std::move(next);
+    }
+
+    std::vector<std::string> dates(common.begin(), common.end());  // std::set is already sorted
+    if (dates.size() < 2) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kValidationFailure,
+            "fewer than 2 dates have data for every requested ticker",
+            "common dates: " + std::to_string(dates.size())));
+    }
+
+    Eigen::Index t = static_cast<Eigen::Index>(dates.size()) - 1;
+    Eigen::Index n = static_cast<Eigen::Index>(tickers.size());
+    Eigen::MatrixXd returns(t, n);
+    for (Eigen::Index j = 0; j < n; ++j) {
+        const auto& price_by_date = by_ticker.at(tickers[static_cast<std::size_t>(j)]);
+        for (Eigen::Index i = 0; i < t; ++i) {
+            double p0 = price_by_date.at(dates[static_cast<std::size_t>(i)]);
+            double p1 = price_by_date.at(dates[static_cast<std::size_t>(i) + 1]);
+            returns(i, j) = std::log(p1 / p0);
+        }
+    }
+
+    return ReturnPanel{std::move(returns), std::move(dates)};
+}
+
+gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::path& output_dir,
+                                gm::Manifest& manifest) {
+    std::int64_t window_days = config.get_int_or("geometry.window_days", 60);
+    std::int64_t k = config.get_int_or("geometry.embedding_dims", 3);
+    if (window_days < 2) {
+        return tl::unexpected(
+            gm::Error::make(gm::ErrorCode::kInvalidArgument, "geometry.window_days must be >= 2"));
+    }
+    if (k < 1) {
+        return tl::unexpected(
+            gm::Error::make(gm::ErrorCode::kInvalidArgument, "geometry.embedding_dims must be >= 1"));
+    }
+
+    std::filesystem::path ingest_dir = output_dir.parent_path() / "gm-ingest";
+
+    auto tickers = load_ticker_universe(ingest_dir);
+    if (!tickers) return tl::unexpected(tickers.error());
+    if (static_cast<std::int64_t>(tickers->size()) < k) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kValidationFailure, "fewer tickers than geometry.embedding_dims",
+            std::to_string(tickers->size()) + " tickers, k=" + std::to_string(k)));
+    }
+
+    auto prices = gm::io::read_parquet(ingest_dir / "prices.parquet");
+    if (!prices) return tl::unexpected(prices.error());
+
+    auto panel = build_return_panel(*prices, *tickers);
+    if (!panel) return tl::unexpected(panel.error());
+
+    Eigen::Index total_t = panel->returns.rows();
+    Eigen::Index n = panel->returns.cols();
+    double q = static_cast<double>(n) / static_cast<double>(window_days);
+
+    if (total_t < window_days) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kValidationFailure, "fewer return observations than geometry.window_days",
+            std::to_string(total_t) + " < " + std::to_string(window_days)));
+    }
+
+    std::vector<std::string> out_dates, out_tickers;
+    std::vector<double> out_x, out_y, out_z;
+    std::vector<std::string> regime_dates;
+    std::vector<double> regime_structural_change;
+
+    std::optional<Eigen::MatrixXd> previous_aligned;
+
+    for (Eigen::Index frame_end = window_days - 1; frame_end < total_t; ++frame_end) {
+        Eigen::MatrixXd window = panel->returns.block(frame_end - window_days + 1, 0, window_days, n);
+        // The frame is dated as-of the day the return window ENDS -
+        // i.e. the day the last return in the window was realized,
+        // which is dates[frame_end + 1] (returns.row(i) spans
+        // dates[i] -> dates[i+1]).
+        const std::string& frame_date = panel->dates[static_cast<std::size_t>(frame_end) + 1];
+
+        auto corr = gm::geometry::sample_correlation(window);
+        if (!corr) return tl::unexpected(corr.error());
+
+        auto shrunk = gm::geometry::ledoit_wolf_shrink_correlation(window);
+        if (!shrunk) return tl::unexpected(shrunk.error());
+
+        auto denoised = gm::geometry::mp_denoise(shrunk->correlation, q);
+        if (!denoised) return tl::unexpected(denoised.error());
+
+        auto dist = gm::geometry::mantegna_distance(denoised->denoised_correlation);
+        if (!dist) return tl::unexpected(dist.error());
+
+        auto embedding = gm::geometry::classical_mds(*dist, static_cast<int>(k));
+        if (!embedding) return tl::unexpected(embedding.error());
+
+        Eigen::MatrixXd aligned;
+        double structural_change = 0.0;
+        if (previous_aligned.has_value()) {
+            auto proc = gm::geometry::align(embedding->coordinates, *previous_aligned);
+            if (!proc) return tl::unexpected(proc.error());
+            aligned = proc->aligned;
+            structural_change = proc->normalized_residual;
+        } else {
+            aligned = embedding->coordinates;  // first frame: nothing to align to yet
+        }
+        previous_aligned = aligned;
+
+        for (Eigen::Index i = 0; i < n; ++i) {
+            out_dates.push_back(frame_date);
+            out_tickers.push_back((*tickers)[static_cast<std::size_t>(i)]);
+            out_x.push_back(aligned(i, 0));
+            out_y.push_back(k >= 2 ? aligned(i, 1) : 0.0);
+            out_z.push_back(k >= 3 ? aligned(i, 2) : 0.0);
+        }
+        regime_dates.push_back(frame_date);
+        regime_structural_change.push_back(structural_change);
+    }
+
+    gm::io::Table geometry_table;
+    if (auto r = geometry_table.add_string_column("date", std::move(out_dates)); !r) return tl::unexpected(r.error());
+    if (auto r = geometry_table.add_string_column("ticker", std::move(out_tickers)); !r) return tl::unexpected(r.error());
+    if (auto r = geometry_table.add_double_column("x", std::move(out_x)); !r) return tl::unexpected(r.error());
+    if (auto r = geometry_table.add_double_column("y", std::move(out_y)); !r) return tl::unexpected(r.error());
+    if (auto r = geometry_table.add_double_column("z", std::move(out_z)); !r) return tl::unexpected(r.error());
+
+    auto write1 = gm::io::write_parquet(geometry_table, output_dir / "geometry.parquet");
+    if (!write1) return tl::unexpected(write1.error());
+
+    gm::io::Table regime_table;
+    if (auto r = regime_table.add_string_column("date", std::move(regime_dates)); !r) return tl::unexpected(r.error());
+    if (auto r = regime_table.add_double_column("structural_change", std::move(regime_structural_change)); !r)
+        return tl::unexpected(r.error());
+
+    auto write2 = gm::io::write_parquet(regime_table, output_dir / "regime.parquet");
+    if (!write2) return tl::unexpected(write2.error());
+
+    manifest.set_int("num_frames", static_cast<std::int64_t>(regime_table.num_rows()));
+    manifest.set_int("num_tickers", static_cast<std::int64_t>(tickers->size()));
+    manifest.set_int("rows_written", static_cast<std::int64_t>(geometry_table.num_rows()));
+    manifest.set_int("window_days", window_days);
+    manifest.set_int("embedding_dims", k);
+    manifest.set_double("q_n_over_window", q);
+
     return {};
 }
 
 } // namespace
 
-int main(int argc, char** argv) {
-    return gm::run_stage_main(argc, argv, "gm-geometry", run_gm_geometry);
-}
+int main(int argc, char** argv) { return gm::run_stage_main(argc, argv, "gm-geometry", run_gm_geometry); }

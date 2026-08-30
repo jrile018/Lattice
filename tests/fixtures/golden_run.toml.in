@@ -30,3 +30,14 @@ end_date = "2024-01-31"
 # criterion is asking to prove.
 max_tickers = 10
 cache_dir = "@GM_REPO_ROOT@/data/raw/price_cache"
+
+[geometry]
+# The fixture's date range is only ~21 trading days (Jan 2024), far
+# short of the real run's default 60-day window (config/params.toml) -
+# window_days sized down here so the golden test still gets multiple
+# real frames (and therefore genuinely exercises Procrustes chaining
+# across frames, not just a single-frame no-op) rather than zero.
+# embedding_dims stays at the ADR-standard 3 (geometry.parquet's x/y/z
+# schema, ADR §8.2) - only the window needed shrinking to fit the range.
+window_days = 10
+embedding_dims = 3

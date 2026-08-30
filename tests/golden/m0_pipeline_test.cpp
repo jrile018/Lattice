@@ -11,6 +11,7 @@
 // layout.
 
 #include <gm-core/manifest.hpp>
+#include <gm-io/parquet.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -102,6 +103,9 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
                 CHECK(std::filesystem::exists(run_dir / stage / "universe.parquet"));
             } else if (std::string_view{stage} == "gm-ingest") {
                 CHECK(std::filesystem::exists(run_dir / stage / "prices.parquet"));
+            } else if (std::string_view{stage} == "gm-geometry") {
+                CHECK(std::filesystem::exists(run_dir / stage / "geometry.parquet"));
+                CHECK(std::filesystem::exists(run_dir / stage / "regime.parquet"));
             } else {
                 std::filesystem::path stub_artifact =
                     run_dir / stage / (std::string{stage} + ".stub.json");
@@ -136,6 +140,30 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
         // not that the market had a bad month.
         CHECK(ingest_manifest->raw()["tickers_ok"].get<std::int64_t>() >= 7);
         CHECK(ingest_manifest->raw()["rows_written"].get<std::int64_t>() > 0);
+    }
+
+    SECTION("gm-geometry produced real per-frame embeddings across multiple frames") {
+        auto geometry_manifest = gm::Manifest::read(run_dir / "gm-geometry" / "manifest.json");
+        REQUIRE(geometry_manifest.has_value());
+
+        REQUIRE(geometry_manifest->raw().contains("num_frames"));
+        // The fixture's window_days=10 over ~21 trading days should
+        // produce more than one frame - genuinely exercising Procrustes
+        // chaining across frames, not just a single-frame no-op where
+        // the "previous frame" branch of gm-geometry's main loop never
+        // actually runs.
+        CHECK(geometry_manifest->raw()["num_frames"].get<std::int64_t>() > 1);
+        CHECK(geometry_manifest->raw()["rows_written"].get<std::int64_t>() > 0);
+
+        auto regime = gm::io::read_parquet(run_dir / "gm-geometry" / "regime.parquet");
+        REQUIRE(regime.has_value());
+        auto structural_change = regime->double_column("structural_change");
+        REQUIRE(structural_change.has_value());
+        REQUIRE(structural_change->size() > 1);
+        // The very first frame has nothing to align to yet
+        // (gm-geometry's documented convention) - its structural_change
+        // is exactly 0, not a meaningless residual against nothing.
+        CHECK((*structural_change)[0] == 0.0);
     }
 
     std::filesystem::remove_all(run_dir);
