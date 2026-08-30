@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -115,7 +116,15 @@ void load_selected_run(AppState& state, gm::view::PointCloudRenderer& renderer) 
 
 int main(int argc, char** argv) {
     std::string runs_base_dir = "runs";
-    if (argc > 1) runs_base_dir = argv[1];
+    int start_frame = 0;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--start-frame" && i + 1 < argc) {
+            start_frame = std::atoi(argv[++i]);
+        } else {
+            runs_base_dir = arg;
+        }
+    }
 
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) {
@@ -165,6 +174,11 @@ int main(int argc, char** argv) {
         if (!state.runs.empty()) {
             state.selected_run = 0;
             load_selected_run(state, renderer);
+            if (start_frame > 0 && !state.loaded.frames.empty()) {
+                state.current_frame =
+                    std::min(start_frame, static_cast<int>(state.loaded.frames.size()) - 1);
+                upload_frame(renderer, state, state.current_frame);
+            }
         }
     } else {
         spdlog::error("gm-view: failed to list runs: {}", runs.error().to_string());
