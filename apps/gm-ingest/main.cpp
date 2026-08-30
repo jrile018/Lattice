@@ -94,12 +94,20 @@ gm::Result<TickerBars> fetch_and_screen(gm::io::HttpCache& cache, const gm::Nyse
                                                ticker + ": " + e.what()));
     }
 
-    auto results_it = doc.find("/chart/result"_json_pointer);
-    if (results_it == doc.end() || !results_it->is_array() || results_it->empty()) {
+    // nlohmann::json::find() only searches immediate object keys - it
+    // does NOT take a json_pointer for path traversal (that was a real
+    // bug here initially, not just the deprecation warning that caught
+    // it: .contains()/.at() are the pointer-aware members).
+    if (!doc.contains("/chart/result"_json_pointer)) {
         return tl::unexpected(gm::Error::make(gm::ErrorCode::kParseFailure,
-                                               "Yahoo chart response has no result", ticker));
+                                               "Yahoo chart response has no chart.result", ticker));
     }
-    const auto& result = (*results_it)[0];
+    const auto& results = doc.at("/chart/result"_json_pointer);
+    if (!results.is_array() || results.empty()) {
+        return tl::unexpected(gm::Error::make(gm::ErrorCode::kParseFailure,
+                                               "Yahoo chart response has an empty result", ticker));
+    }
+    const auto& result = results[0];
 
     if (!result.contains("timestamp") || !result.contains("indicators")) {
         return tl::unexpected(gm::Error::make(
