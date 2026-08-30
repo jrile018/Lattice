@@ -27,10 +27,14 @@ nothing stops you from adding a Ninja preset locally.
 which needs `flex` and `bison` to build from source. If they are not
 installed system-wide and you don't have root, they can be fetched
 without root via `apt-get download flex bison libfl-dev libfl2 m4` and
-extracted locally with `dpkg -x <deb> <prefix>`; put `<prefix>/usr/bin`
-on `PATH` before running `vcpkg install`. (This is exactly how the
-project's remote build box — no sudo — is set up; see the M0 session
-notes in git history if you need the literal commands.)
+extracted locally with `dpkg -x <deb> <prefix>`. Put `<prefix>/usr/bin`
+on `PATH` **and** export `BISON_PKGDATADIR=<prefix>/usr/share/bison`
+before running `vcpkg install` — bison hardcodes `/usr/share/bison` at
+compile time and does not locate its own data files relative to its
+binary, so without the env var it fails with `m4sugar.m4: cannot open`
+partway through Thrift's build. (This is exactly how the project's
+remote build box — no sudo — is set up; see the M0 session notes in git
+history if you need the literal commands.)
 
 ## Building
 
