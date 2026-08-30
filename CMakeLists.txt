@@ -89,6 +89,7 @@ target_include_directories(gm_third_party INTERFACE ${CMAKE_SOURCE_DIR}/third_pa
 # provable, not assumed" - no aspirational subdirectories).
 # ---------------------------------------------------------------------------
 add_subdirectory(libs/gm-core)
+add_subdirectory(libs/gm-io)
 
 add_subdirectory(apps/gm-universe)
 add_subdirectory(apps/gm-ingest)
