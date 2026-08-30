@@ -21,7 +21,10 @@ Table make_panel(const std::vector<std::pair<std::string, double>>& ticker_to_do
 
     for (const auto& [ticker, dv] : ticker_to_dollar_volume) {
         for (int d = 1; d <= days; ++d) {
-            char buf[11];
+            // Oversized for GCC's -Wformat-truncation worst-case
+            // analysis on %02d given int's full range - see the
+            // identical comment in gm-core/date.cpp and manifest.cpp.
+            char buf[32];
             std::snprintf(buf, sizeof(buf), "2024-01-%02d", d);
             tickers.push_back(ticker);
             dates.push_back(buf);
