@@ -32,8 +32,28 @@ struct KdeScore {
 /// TRAINING points themselves have density >= level (evaluated
 /// in-sample, not leave-one-out - a documented simplification, not a
 /// silent one; leave-one-out would reduce self-bias further but adds
-/// O(N^2) cost this phase-1 estimator does not need).
+/// cost this phase-1 estimator does not need).
+///
+/// Self-scoring every training point against the full training set to
+/// determine `level` is inherently O(N^2) - fine at N in the low
+/// hundreds, but real at N=756 (ADR §6.4's View B lookback) repeated
+/// independently for every scored day: found the hard way running the
+/// real 16-year pipeline, where it turned an expected few-second stage
+/// into one that hadn't finished after 5+ minutes. Above
+/// kMaxLevelSamplePoints, `level` is determined from a deterministic
+/// (evenly-strided, not random - ADR §3 principle 2 determinism) subset
+/// of the training points rather than all of them. This bounds the
+/// self-scoring cost; density evaluation for an actual query point
+/// (kde_density/score_kde below) still uses every training point
+/// regardless of N, so a query's own density estimate never loses
+/// fidelity - only the level THRESHOLD is estimated from a sample.
 [[nodiscard]] Result<KdeFit> fit_kde(const Eigen::MatrixXd& points, double alpha = 0.05);
+
+/// The subsampling threshold described above. A free function (not a
+/// hidden constant) so a caller reading the header can find the actual
+/// number, and so a test can exercise both the exact and sampled paths
+/// without needing 756+ points to reach the boundary.
+[[nodiscard]] constexpr int kde_max_level_sample_points() { return 200; }
 
 [[nodiscard]] Result<double> kde_density(const KdeFit& fit, const Eigen::VectorXd& point);
 

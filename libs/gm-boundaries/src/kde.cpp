@@ -77,19 +77,30 @@ Result<KdeFit> fit_kde(const Eigen::MatrixXd& points, double alpha) {
 
     KdeFit fit{points, bandwidth, 0.0, alpha};
 
-    std::vector<double> training_log_densities(static_cast<std::size_t>(n));
-    for (Eigen::Index i = 0; i < n; ++i) {
-        training_log_densities[static_cast<std::size_t>(i)] = log_density_at(fit, points.row(i));
-    }
-    std::sort(training_log_densities.begin(), training_log_densities.end());
+    // Self-scoring every training point costs O(sample_size * N) (each
+    // self-score is itself an O(N) density evaluation over the full
+    // training set) - bounded via a deterministic stride, not a random
+    // subsample, when N exceeds kde_max_level_sample_points(). See the
+    // header comment for why this matters at real View B scale.
+    const Eigen::Index sample_size =
+        std::min(n, static_cast<Eigen::Index>(kde_max_level_sample_points()));
+    const Eigen::Index stride = std::max<Eigen::Index>(1, n / sample_size);
 
-    // Order-statistic threshold: the level below which exactly
-    // floor(alpha*N) of the training points fall, so ~(1-alpha) of the
-    // training mass sits at or above `level` (ADR-011's "level set
-    // containing (1-alpha) of training mass").
-    auto idx = static_cast<std::size_t>(alpha * static_cast<double>(n));
-    idx = std::min(idx, static_cast<std::size_t>(n) - 1);
-    fit.level = std::exp(training_log_densities[idx]);
+    std::vector<double> sample_log_densities;
+    sample_log_densities.reserve(static_cast<std::size_t>(sample_size));
+    for (Eigen::Index i = 0; i < n; i += stride) {
+        sample_log_densities.push_back(log_density_at(fit, points.row(i)));
+    }
+    std::sort(sample_log_densities.begin(), sample_log_densities.end());
+
+    // Order-statistic threshold over the sample: the level below which
+    // ~floor(alpha*sample_size) of the SAMPLED points fall, so ~(1-alpha)
+    // of the training mass sits at or above `level` (ADR-011's "level
+    // set containing (1-alpha) of training mass") - approximated from
+    // the sample when N was too large to self-score exactly.
+    auto idx = static_cast<std::size_t>(alpha * static_cast<double>(sample_log_densities.size()));
+    idx = std::min(idx, sample_log_densities.size() - 1);
+    fit.level = std::exp(sample_log_densities[idx]);
 
     return fit;
 }
