@@ -1,0 +1,12 @@
+A suitable version of cmake was not found (required v4.4.2).
+Downloading https://github.com/Kitware/CMake/releases/download/v4.4.2/cmake-4.4.2-windows-x86_64.zip -> cmake-4.4.2-windows-x86_64.zip
+Successfully downloaded cmake-4.4.2-windows-x86_64.zip
+Extracting cmake...
+A suitable version of 7zip was not found (required v26.02).
+Downloading https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.exe -> 7z2602-x64.7z.exe
+Successfully downloaded 7z2602-x64.7z.exe
+Extracting 7zip...
+A suitable version of 7zr was not found (required v26.02).
+Downloading https://github.com/ip7z/7zip/releases/download/26.02/7zr.exe -> dfdcf16e-7zr.exe
+Successfully downloaded dfdcf16e-7zr.exe
+error: the baseline does not contain an entry for port onetbb

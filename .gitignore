@@ -1,0 +1,27 @@
+# Build outputs
+build/
+build-*/
+out/
+
+# vcpkg tool + downloaded/built packages (bootstrapped locally, not committed)
+tools/vcpkg/
+
+# Data caches (large, timestamped, regenerable from source URLs)
+data/raw/*
+!data/raw/.gitkeep
+
+# Run artifacts (immutable but large; not source)
+runs/*
+!runs/.gitkeep
+
+# Editor / OS
+.vs/
+.vscode/
+*.user
+.DS_Store
+Thumbs.db
+
+# CMake
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
