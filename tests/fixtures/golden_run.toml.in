@@ -1,0 +1,21 @@
+# Golden-pipeline fixture (ADR-020 layer 2; ADR.md §13 M0/M1 exit
+# criteria). Processed by CMake's configure_file() (tests/golden/CMakeLists.txt)
+# so @GM_REPO_ROOT@ resolves to an absolute, build-machine-correct path
+# regardless of ctest's working directory - a static committed TOML
+# can't know that path.
+#
+# As each stage graduates from an M0 stub to a real M1+ implementation,
+# this file grows the config section that stage now needs. The stages
+# still stubbed only need [output]; gm-universe (real as of M1) needs
+# [universe] too.
+
+[output]
+runs_base_dir = "runs"
+
+[universe]
+snapshot_csv = "@GM_REPO_ROOT@/data/reference/sp500_constituents.csv"
+# A small, fixed range so the golden test stays fast - the full
+# 15-year/100-name panel (ADR.md §13 M1 exit criterion) is a separate,
+# larger run on the remote box, not something re-run on every test pass.
+start_date = "2024-01-02"
+end_date = "2024-01-31"

@@ -1,6 +1,0 @@
-# M0 golden-pipeline fixture (ADR-020 layer 2, ADR.md §13 M0 exit
-# criterion). Every M0 stub stage only needs to know where to put its
-# stub artifact; --output-dir is supplied per-stage by gm-run itself, so
-# this config only needs the shared base.
-[output]
-runs_base_dir = "runs"

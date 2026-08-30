@@ -90,6 +90,7 @@ target_include_directories(gm_third_party INTERFACE ${CMAKE_SOURCE_DIR}/third_pa
 # ---------------------------------------------------------------------------
 add_subdirectory(libs/gm-core)
 add_subdirectory(libs/gm-io)
+add_subdirectory(libs/gm-data)
 
 add_subdirectory(apps/gm-universe)
 add_subdirectory(apps/gm-ingest)

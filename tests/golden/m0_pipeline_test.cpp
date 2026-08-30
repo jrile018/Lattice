@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <sstream>
+#include <string_view>
 
 #if !defined(_WIN32)
 #include <sys/wait.h>
@@ -26,8 +27,8 @@
 #ifndef GM_RUN_EXECUTABLE
 #error "GM_RUN_EXECUTABLE must be defined by CMake"
 #endif
-#ifndef GM_TEST_FIXTURES_DIR
-#error "GM_TEST_FIXTURES_DIR must be defined by CMake"
+#ifndef GM_GOLDEN_FIXTURE_CONFIG
+#error "GM_GOLDEN_FIXTURE_CONFIG must be defined by CMake"
 #endif
 
 namespace {
@@ -36,6 +37,20 @@ constexpr std::array<const char*, 8> kExpectedStages = {
     "gm-universe", "gm-ingest",   "gm-features",  "gm-geometry",
     "gm-boundaries", "gm-signals", "gm-backtest", "gm-report",
 };
+
+// gm-universe graduated from an M0 stub to a real M1 implementation; the
+// other 7 have not yet (see ADR.md §13 milestones). This set is what
+// makes this one golden test track the pipeline's incremental rollout
+// instead of needing a rewrite every time a stage graduates - each
+// stage's artifact check just needs to know which column it's in.
+constexpr std::array<const char*, 1> kGraduatedStages = {"gm-universe"};
+
+bool is_graduated(const char* stage) {
+    for (const char* g : kGraduatedStages) {
+        if (std::string_view{g} == stage) return true;
+    }
+    return false;
+}
 
 int normalized_exit_code(int system_result) {
 #if defined(_WIN32)
@@ -54,8 +69,7 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
     // Clean slate: this test must be re-runnable, not just runnable once.
     std::filesystem::remove_all(run_dir);
 
-    std::filesystem::path fixture_config =
-        std::filesystem::path{GM_TEST_FIXTURES_DIR} / "m0_stub_run.toml";
+    std::filesystem::path fixture_config = GM_GOLDEN_FIXTURE_CONFIG;
     REQUIRE(std::filesystem::exists(fixture_config));
 
     std::ostringstream cmd;
@@ -83,16 +97,34 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
         }
     }
 
-    SECTION("every stage wrote a valid manifest and its stub artifact") {
+    SECTION("every stage wrote a valid manifest and its expected artifact") {
         for (const char* stage : kExpectedStages) {
             auto stage_manifest = gm::Manifest::read(run_dir / stage / "manifest.json");
             REQUIRE(stage_manifest.has_value());
             CHECK(stage_manifest->stage() == stage);
             CHECK(stage_manifest->raw().value("status", "") == "ok");
 
-            std::filesystem::path stub_artifact = run_dir / stage / (std::string{stage} + ".stub.json");
-            CHECK(std::filesystem::exists(stub_artifact));
+            if (is_graduated(stage)) {
+                // gm-universe: real artifact, checked in detail below.
+                CHECK(std::filesystem::exists(run_dir / stage / "universe.parquet"));
+            } else {
+                std::filesystem::path stub_artifact =
+                    run_dir / stage / (std::string{stage} + ".stub.json");
+                CHECK(std::filesystem::exists(stub_artifact));
+            }
         }
+    }
+
+    SECTION("gm-universe produced real point-in-time membership for the fixture range") {
+        auto universe_manifest = gm::Manifest::read(run_dir / "gm-universe" / "manifest.json");
+        REQUIRE(universe_manifest.has_value());
+        // A real row count for a ~500-name universe over one month of
+        // trading days (~21 days in Jan 2024) - not zero, not a stub
+        // placeholder. The exact figure is asserted in gm-data's own
+        // unit tests; this just confirms the wiring produced *something
+        // real* end to end through the actual gm-run subprocess chain.
+        REQUIRE(universe_manifest->raw().contains("rows_written"));
+        CHECK(universe_manifest->raw()["rows_written"].get<std::int64_t>() > 1000);
     }
 
     std::filesystem::remove_all(run_dir);

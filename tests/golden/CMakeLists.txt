@@ -1,3 +1,13 @@
+# See tests/fixtures/golden_run.toml.in - @GM_REPO_ROOT@ becomes an
+# absolute path so the fixture works regardless of ctest's working
+# directory.
+set(GM_REPO_ROOT ${CMAKE_SOURCE_DIR})
+configure_file(
+  ${CMAKE_SOURCE_DIR}/tests/fixtures/golden_run.toml.in
+  ${CMAKE_CURRENT_BINARY_DIR}/golden_run.toml
+  @ONLY
+)
+
 add_executable(gm-golden-tests
   m0_pipeline_test.cpp
 )
@@ -18,7 +28,7 @@ add_dependencies(gm-golden-tests
 
 target_compile_definitions(gm-golden-tests PRIVATE
   GM_RUN_EXECUTABLE="$<TARGET_FILE:gm-run>"
-  GM_TEST_FIXTURES_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures"
+  GM_GOLDEN_FIXTURE_CONFIG="${CMAKE_CURRENT_BINARY_DIR}/golden_run.toml"
 )
 
 catch_discover_tests(gm-golden-tests)
