@@ -5,6 +5,8 @@ out/
 
 # vcpkg tool + downloaded/built packages (bootstrapped locally, not committed)
 tools/vcpkg/
+tools/vcpkg_installed/
+tools/*.log
 
 # Data caches (large, timestamped, regenerable from source URLs)
 data/raw/*

@@ -17,7 +17,7 @@
     "benchmark",
     "osqp",
     "boost-math",
-    "onetbb",
+    "tbb",
     {
       "name": "imgui",
       "features": ["glfw-binding", "opengl3-binding"]
