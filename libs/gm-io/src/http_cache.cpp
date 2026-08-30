@@ -8,6 +8,7 @@
 #include <ctime>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 namespace gm::io {
 
@@ -153,7 +154,30 @@ Result<CacheEntry> HttpCache::get(const std::string& url, std::string_view cache
                                                cache_dir_.string() + ": " + ec.message()));
     }
 
-    cpr::Response response = cpr::Get(cpr::Url{url}, cpr::Timeout{30000});
+    // A descriptive User-Agent plus retry-with-backoff on 429/5xx - both
+    // discovered necessary the hard way during M1's real gm-ingest
+    // fetches: an unadorned client hitting Yahoo's endpoint 10 times in
+    // under a second got rate-limited (HTTP 429) on nearly every
+    // request. This lives in the general-purpose cache, not gm-ingest,
+    // because any caller of gm-io hitting any real API will eventually
+    // need the same thing.
+    static constexpr int kMaxAttempts = 4;
+    static constexpr int kBaseBackoffMs = 500;
+
+    cpr::Response response;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        response = cpr::Get(cpr::Url{url}, cpr::Timeout{30000},
+                             cpr::Header{{"User-Agent", "geomarket-research/0.1 (+M1 gm-ingest)"}});
+
+        if (response.error) break;  // network-level failure - not retryable here
+        bool retryable = response.status_code == 429 ||
+                          (response.status_code >= 500 && response.status_code < 600);
+        if (!retryable) break;
+        if (attempt + 1 < kMaxAttempts) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(kBaseBackoffMs << attempt));  // 500ms, 1s, 2s
+        }
+    }
 
     if (response.error) {
         return tl::unexpected(gm::Error::make(
