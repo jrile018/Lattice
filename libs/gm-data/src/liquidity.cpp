@@ -63,8 +63,17 @@ Result<std::vector<LiquidityRankedTicker>> rank_by_liquidity(const gm::io::Table
         ranked.push_back(LiquidityRankedTicker{ticker, median_of(std::move(dollar_volumes)), take});
     }
 
+    // Secondary sort key on ticker name, not just std::stable_sort: the
+    // tickers are collected via std::unordered_map iteration above,
+    // whose order is itself unspecified and can vary run to run - a
+    // stable sort would faithfully preserve that already-nondeterministic
+    // order for exact ties, not fix it. Only a real tiebreaker makes
+    // "same inputs -> same output" (ADR §3 principle 2) actually hold.
     std::sort(ranked.begin(), ranked.end(), [](const LiquidityRankedTicker& a, const LiquidityRankedTicker& b) {
-        return a.median_dollar_volume > b.median_dollar_volume;
+        if (a.median_dollar_volume != b.median_dollar_volume) {
+            return a.median_dollar_volume > b.median_dollar_volume;
+        }
+        return a.ticker < b.ticker;
     });
 
     if (ranked.size() > static_cast<std::size_t>(top_n)) {

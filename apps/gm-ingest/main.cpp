@@ -95,77 +95,98 @@ gm::Result<TickerBars> fetch_and_screen(gm::io::HttpCache& cache, const gm::Nyse
                                                ticker + ": " + e.what()));
     }
 
-    // nlohmann::json::find() only searches immediate object keys - it
-    // does NOT take a json_pointer for path traversal (that was a real
-    // bug here initially, not just the deprecation warning that caught
-    // it: .contains()/.at() are the pointer-aware members).
-    if (!doc.contains("/chart/result"_json_pointer)) {
-        return tl::unexpected(gm::Error::make(gm::ErrorCode::kParseFailure,
-                                               "Yahoo chart response has no chart.result", ticker));
-    }
-    const auto& results = doc.at("/chart/result"_json_pointer);
-    if (!results.is_array() || results.empty()) {
-        return tl::unexpected(gm::Error::make(gm::ErrorCode::kParseFailure,
-                                               "Yahoo chart response has an empty result", ticker));
-    }
-    const auto& result = results[0];
-
-    if (!result.contains("timestamp") || !result.contains("indicators")) {
-        return tl::unexpected(gm::Error::make(
-            gm::ErrorCode::kParseFailure, "Yahoo chart result missing timestamp/indicators", ticker));
-    }
-    const auto& timestamps = result.at("timestamp");
-    const auto& quote = result.at("/indicators/quote/0"_json_pointer);
-    const auto& adjclose_arr = result.at("/indicators/adjclose/0/adjclose"_json_pointer);
-
+    // Everything below navigates and reads `doc` via nlohmann's
+    // .at()/.contains()/operator[]/.get<T>(), every one of which can
+    // throw (json::out_of_range, json::type_error, ...) if Yahoo's
+    // response shape doesn't match what's assumed here - e.g. a ticker
+    // it doesn't recognize, or a field the API renames. The whole
+    // navigation+extraction pass is one try block for exactly that
+    // reason (ADR-019: exceptions must not escape past a stage's error
+    // boundary; a per-.at()-call try/catch would be unreadable and easy
+    // to miss one of on the next edit - a real bug the M1 code review
+    // caught here). `bars` is declared outside the try only because its
+    // std::vector<std::string>/double/... members are safe to touch
+    // after the block; nothing about their construction can throw a
+    // json exception.
     TickerBars bars;
-    double prev_adjclose = 0.0;
-    bool have_prev = false;
-    std::optional<gm::Date> prev_date;
-
-    for (std::size_t i = 0; i < timestamps.size(); ++i) {
-        const auto& close_v = quote.at("close")[i];
-        const auto& volume_v = quote.at("volume")[i];
-        const auto& adjclose_v = adjclose_arr[i];
-
-        if (close_v.is_null() || volume_v.is_null() || adjclose_v.is_null()) {
-            ++bars.dropped_null_bars;
-            continue;
+    try {
+        // nlohmann::json::find() only searches immediate object keys -
+        // it does NOT take a json_pointer for path traversal (that was
+        // a real bug here initially, not just the deprecation warning
+        // that caught it: .contains()/.at() are the pointer-aware
+        // members).
+        if (!doc.contains("/chart/result"_json_pointer)) {
+            return tl::unexpected(gm::Error::make(
+                gm::ErrorCode::kParseFailure, "Yahoo chart response has no chart.result", ticker));
         }
+        const auto& results = doc.at("/chart/result"_json_pointer);
+        if (!results.is_array() || results.empty()) {
+            return tl::unexpected(gm::Error::make(gm::ErrorCode::kParseFailure,
+                                                   "Yahoo chart response has an empty result", ticker));
+        }
+        const auto& result = results[0];
 
-        double adjclose = adjclose_v.get<double>();
+        if (!result.contains("timestamp") || !result.contains("indicators")) {
+            return tl::unexpected(
+                gm::Error::make(gm::ErrorCode::kParseFailure,
+                                 "Yahoo chart result missing timestamp/indicators", ticker));
+        }
+        const auto& timestamps = result.at("timestamp");
+        const auto& quote = result.at("/indicators/quote/0"_json_pointer);
+        const auto& adjclose_arr = result.at("/indicators/adjclose/0/adjclose"_json_pointer);
 
-        if (have_prev && prev_adjclose > 0.0) {
-            double log_return = std::log(adjclose / prev_adjclose);
-            if (std::abs(log_return) > std::log(1.5)) {  // +/-50% move in the adjusted series
-                return tl::unexpected(gm::Error::make(
-                    gm::ErrorCode::kValidationFailure,
-                    "adjusted-close day-over-day return exceeds +/-50% (ADR-015 screen)",
-                    ticker + " at index " + std::to_string(i) + ": " +
-                        std::to_string(prev_adjclose) + " -> " + std::to_string(adjclose)));
+        double prev_adjclose = 0.0;
+        bool have_prev = false;
+        std::optional<gm::Date> prev_date;
+
+        for (std::size_t i = 0; i < timestamps.size(); ++i) {
+            const auto& close_v = quote.at("close")[i];
+            const auto& volume_v = quote.at("volume")[i];
+            const auto& adjclose_v = adjclose_arr[i];
+
+            if (close_v.is_null() || volume_v.is_null() || adjclose_v.is_null()) {
+                ++bars.dropped_null_bars;
+                continue;
             }
+
+            double adjclose = adjclose_v.get<double>();
+
+            if (have_prev && prev_adjclose > 0.0) {
+                double log_return = std::log(adjclose / prev_adjclose);
+                if (std::abs(log_return) > std::log(1.5)) {  // +/-50% move in the adjusted series
+                    return tl::unexpected(gm::Error::make(
+                        gm::ErrorCode::kValidationFailure,
+                        "adjusted-close day-over-day return exceeds +/-50% (ADR-015 screen)",
+                        ticker + " at index " + std::to_string(i) + ": " +
+                            std::to_string(prev_adjclose) + " -> " + std::to_string(adjclose)));
+                }
+            }
+            prev_adjclose = adjclose;
+            have_prev = true;
+
+            gm::Date bar_date = epoch_seconds_to_date(timestamps[i].get<std::int64_t>());
+
+            if (prev_date.has_value()) {
+                std::int64_t gap = calendar.count_trading_days(*prev_date, bar_date) - 1;
+                if (gap > 3) ++bars.gap_days_over_3;
+            }
+            prev_date = bar_date;
+
+            std::int64_t volume = volume_v.get<std::int64_t>();
+            if (volume == 0) ++bars.zero_volume_days;
+
+            bars.dates.push_back(bar_date.to_iso());
+            bars.open.push_back(quote.at("open")[i].is_null() ? 0.0 : quote.at("open")[i].get<double>());
+            bars.high.push_back(quote.at("high")[i].is_null() ? 0.0 : quote.at("high")[i].get<double>());
+            bars.low.push_back(quote.at("low")[i].is_null() ? 0.0 : quote.at("low")[i].get<double>());
+            bars.close.push_back(close_v.get<double>());
+            bars.adjclose.push_back(adjclose);
+            bars.volume.push_back(volume);
         }
-        prev_adjclose = adjclose;
-        have_prev = true;
-
-        gm::Date bar_date = epoch_seconds_to_date(timestamps[i].get<std::int64_t>());
-
-        if (prev_date.has_value()) {
-            std::int64_t gap = calendar.count_trading_days(*prev_date, bar_date) - 1;
-            if (gap > 3) ++bars.gap_days_over_3;
-        }
-        prev_date = bar_date;
-
-        std::int64_t volume = volume_v.get<std::int64_t>();
-        if (volume == 0) ++bars.zero_volume_days;
-
-        bars.dates.push_back(bar_date.to_iso());
-        bars.open.push_back(quote.at("open")[i].is_null() ? 0.0 : quote.at("open")[i].get<double>());
-        bars.high.push_back(quote.at("high")[i].is_null() ? 0.0 : quote.at("high")[i].get<double>());
-        bars.low.push_back(quote.at("low")[i].is_null() ? 0.0 : quote.at("low")[i].get<double>());
-        bars.close.push_back(close_v.get<double>());
-        bars.adjclose.push_back(adjclose);
-        bars.volume.push_back(volume);
+    } catch (const nlohmann::json::exception& e) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kParseFailure, "Yahoo chart response has an unexpected shape",
+            ticker + ": " + e.what()));
     }
 
     if (bars.dates.empty()) {
@@ -245,14 +266,19 @@ gm::VoidResult run_gm_ingest(const gm::Config& config, const std::filesystem::pa
                                                "nothing to write"));
     }
 
-    combined.add_string_column("ticker", std::move(all_ticker));
-    combined.add_string_column("date", std::move(all_date));
-    combined.add_double_column("open", std::move(all_open));
-    combined.add_double_column("high", std::move(all_high));
-    combined.add_double_column("low", std::move(all_low));
-    combined.add_double_column("close", std::move(all_close));
-    combined.add_double_column("adjclose", std::move(all_adjclose));
-    combined.add_int64_column("volume", std::move(all_volume));
+    // Table's add_*_column calls are [[nodiscard]] Result<void> (ADR §3
+    // principle 1) - every call constructed identically from vectors
+    // whose lengths were built in lockstep above, so a failure here
+    // would mean a real bug in this function, not a data problem; still
+    // checked and propagated rather than ignored.
+    if (auto r = combined.add_string_column("ticker", std::move(all_ticker)); !r) return tl::unexpected(r.error());
+    if (auto r = combined.add_string_column("date", std::move(all_date)); !r) return tl::unexpected(r.error());
+    if (auto r = combined.add_double_column("open", std::move(all_open)); !r) return tl::unexpected(r.error());
+    if (auto r = combined.add_double_column("high", std::move(all_high)); !r) return tl::unexpected(r.error());
+    if (auto r = combined.add_double_column("low", std::move(all_low)); !r) return tl::unexpected(r.error());
+    if (auto r = combined.add_double_column("close", std::move(all_close)); !r) return tl::unexpected(r.error());
+    if (auto r = combined.add_double_column("adjclose", std::move(all_adjclose)); !r) return tl::unexpected(r.error());
+    if (auto r = combined.add_int64_column("volume", std::move(all_volume)); !r) return tl::unexpected(r.error());
 
     auto write_result = gm::io::write_parquet(combined, output_dir / "prices.parquet");
     if (!write_result) return tl::unexpected(write_result.error());
@@ -283,9 +309,9 @@ gm::VoidResult run_gm_ingest(const gm::Config& config, const std::filesystem::pa
             liquid_medians.push_back(r.median_dollar_volume);
             liquid_bars_used.push_back(static_cast<std::int64_t>(r.bars_used));
         }
-        liquid.add_string_column("ticker", std::move(liquid_tickers));
-        liquid.add_double_column("median_dollar_volume", std::move(liquid_medians));
-        liquid.add_int64_column("bars_used", std::move(liquid_bars_used));
+        if (auto r = liquid.add_string_column("ticker", std::move(liquid_tickers)); !r) return tl::unexpected(r.error());
+        if (auto r = liquid.add_double_column("median_dollar_volume", std::move(liquid_medians)); !r) return tl::unexpected(r.error());
+        if (auto r = liquid.add_int64_column("bars_used", std::move(liquid_bars_used)); !r) return tl::unexpected(r.error());
 
         auto liquid_write = gm::io::write_parquet(liquid, output_dir / "liquid_universe.parquet");
         if (!liquid_write) return tl::unexpected(liquid_write.error());

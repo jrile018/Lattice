@@ -28,17 +28,19 @@ public:
 
     /// Every add_*_column call must supply exactly num_rows() values,
     /// except the very first column added (which establishes
-    /// num_rows()). Column names must be unique. Violating either is a
-    /// programming error in the caller (a stage's own code constructing
-    /// its output), not a data-quality issue - it asserts rather than
-    /// returning Result, matching how out-of-contract API misuse is
-    /// handled elsewhere in gm-core (e.g. StrongId's type safety is
-    /// compile-time; this is the analogous runtime case for a column
-    /// count that can't be checked at compile time).
-    void add_string_column(std::string name, std::vector<std::string> values);
-    void add_int64_column(std::string name, std::vector<std::int64_t> values);
-    void add_double_column(std::string name, std::vector<double> values);
-    void add_bool_column(std::string name, std::vector<std::uint8_t> values);
+    /// num_rows()). Column names must be unique. Violating either
+    /// returns an error rather than asserting: these ARE programming
+    /// errors in the caller, but ADR §3 principle 1 ("correctness is
+    /// provable, not assumed") outranks the usual C++ convention of
+    /// asserting on caller contracts - and concretely, this project's
+    /// own RelWithDebInfo build (used for every "release" test run)
+    /// defines NDEBUG by default, which would have compiled an assert
+    /// here to a silent no-op in exactly the build configuration this
+    /// codebase actually ships and tests.
+    [[nodiscard]] gm::VoidResult add_string_column(std::string name, std::vector<std::string> values);
+    [[nodiscard]] gm::VoidResult add_int64_column(std::string name, std::vector<std::int64_t> values);
+    [[nodiscard]] gm::VoidResult add_double_column(std::string name, std::vector<double> values);
+    [[nodiscard]] gm::VoidResult add_bool_column(std::string name, std::vector<std::uint8_t> values);
 
     [[nodiscard]] std::size_t num_rows() const noexcept { return num_rows_; }
     [[nodiscard]] std::size_t num_columns() const noexcept { return columns_.size(); }
@@ -62,7 +64,8 @@ private:
         ColumnData data;
     };
 
-    void add_column_checked(std::string name, ColumnType type, ColumnData data, std::size_t values_size);
+    [[nodiscard]] gm::VoidResult add_column_checked(std::string name, ColumnType type, ColumnData data,
+                                                      std::size_t values_size);
     [[nodiscard]] const Column* find(std::string_view name) const noexcept;
 
     std::vector<Column> columns_;

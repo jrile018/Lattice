@@ -66,11 +66,13 @@ gm::VoidResult run_gm_universe(const gm::Config& config, const std::filesystem::
     }
 
     gm::io::Table table;
-    table.add_string_column("date", std::move(dates));
-    table.add_string_column("ticker", std::move(tickers));
-    table.add_string_column("security_name", std::move(security_names));
-    table.add_string_column("gics_sector", std::move(gics_sectors));
-    table.add_int64_column("cik", std::move(ciks));
+    if (auto r = table.add_string_column("date", std::move(dates)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_string_column("ticker", std::move(tickers)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_string_column("security_name", std::move(security_names)); !r)
+        return tl::unexpected(r.error());
+    if (auto r = table.add_string_column("gics_sector", std::move(gics_sectors)); !r)
+        return tl::unexpected(r.error());
+    if (auto r = table.add_int64_column("cik", std::move(ciks)); !r) return tl::unexpected(r.error());
 
     auto write_result = gm::io::write_parquet(table, output_dir / "universe.parquet");
     if (!write_result) return tl::unexpected(write_result.error());

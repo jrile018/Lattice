@@ -1,7 +1,5 @@
 #include <gm-io/table.hpp>
 
-#include <cassert>
-
 namespace gm::io {
 
 const Table::Column* Table::find(std::string_view name) const noexcept {
@@ -11,36 +9,44 @@ const Table::Column* Table::find(std::string_view name) const noexcept {
     return nullptr;
 }
 
-void Table::add_column_checked(std::string name, ColumnType type, ColumnData data,
-                                std::size_t values_size) {
-    assert(find(name) == nullptr && "Table: duplicate column name");
+gm::VoidResult Table::add_column_checked(std::string name, ColumnType type, ColumnData data,
+                                          std::size_t values_size) {
+    if (find(name) != nullptr) {
+        return tl::unexpected(
+            gm::Error::make(gm::ErrorCode::kInvalidArgument, "Table: duplicate column name", name));
+    }
+    if (!columns_.empty() && values_size != num_rows_) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kInvalidArgument, "Table: column length does not match table's row count",
+            name + ": table has " + std::to_string(num_rows_) + " rows, column has " +
+                std::to_string(values_size)));
+    }
     if (columns_.empty()) {
         num_rows_ = values_size;
-    } else {
-        assert(values_size == num_rows_ && "Table: column length does not match table's row count");
     }
     column_names_.push_back(name);
     columns_.push_back(Column{std::move(name), type, std::move(data)});
+    return {};
 }
 
-void Table::add_string_column(std::string name, std::vector<std::string> values) {
+gm::VoidResult Table::add_string_column(std::string name, std::vector<std::string> values) {
     std::size_t n = values.size();
-    add_column_checked(std::move(name), ColumnType::kString, ColumnData{std::move(values)}, n);
+    return add_column_checked(std::move(name), ColumnType::kString, ColumnData{std::move(values)}, n);
 }
 
-void Table::add_int64_column(std::string name, std::vector<std::int64_t> values) {
+gm::VoidResult Table::add_int64_column(std::string name, std::vector<std::int64_t> values) {
     std::size_t n = values.size();
-    add_column_checked(std::move(name), ColumnType::kInt64, ColumnData{std::move(values)}, n);
+    return add_column_checked(std::move(name), ColumnType::kInt64, ColumnData{std::move(values)}, n);
 }
 
-void Table::add_double_column(std::string name, std::vector<double> values) {
+gm::VoidResult Table::add_double_column(std::string name, std::vector<double> values) {
     std::size_t n = values.size();
-    add_column_checked(std::move(name), ColumnType::kDouble, ColumnData{std::move(values)}, n);
+    return add_column_checked(std::move(name), ColumnType::kDouble, ColumnData{std::move(values)}, n);
 }
 
-void Table::add_bool_column(std::string name, std::vector<std::uint8_t> values) {
+gm::VoidResult Table::add_bool_column(std::string name, std::vector<std::uint8_t> values) {
     std::size_t n = values.size();
-    add_column_checked(std::move(name), ColumnType::kBool, ColumnData{std::move(values)}, n);
+    return add_column_checked(std::move(name), ColumnType::kBool, ColumnData{std::move(values)}, n);
 }
 
 bool Table::has_column(std::string_view name) const noexcept { return find(name) != nullptr; }

@@ -34,10 +34,10 @@ Table make_panel(const std::vector<std::pair<std::string, double>>& ticker_to_do
     }
 
     Table t;
-    t.add_string_column("ticker", std::move(tickers));
-    t.add_string_column("date", std::move(dates));
-    t.add_double_column("close", std::move(closes));
-    t.add_int64_column("volume", std::move(volumes));
+    REQUIRE(t.add_string_column("ticker", std::move(tickers)).has_value());
+    REQUIRE(t.add_string_column("date", std::move(dates)).has_value());
+    REQUIRE(t.add_double_column("close", std::move(closes)).has_value());
+    REQUIRE(t.add_int64_column("volume", std::move(volumes)).has_value());
     return t;
 }
 
@@ -81,11 +81,14 @@ TEST_CASE("median uses only the trailing window, not the ticker's full history",
     Table t;
     // AAPL: 5 low-volume days, then 3 recent high-volume days. A
     // 3-day window must see only the high-volume tail.
-    t.add_string_column("ticker", {"AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "AAPL"});
-    t.add_string_column("date", {"2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05",
-                                  "2024-01-08", "2024-01-09", "2024-01-10"});
-    t.add_double_column("close", {100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0});
-    t.add_int64_column("volume", {10, 10, 10, 10, 10, 100000, 100000, 100000});
+    REQUIRE(t.add_string_column("ticker", {"AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "AAPL"})
+                .has_value());
+    REQUIRE(t.add_string_column("date", {"2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04",
+                                          "2024-01-05", "2024-01-08", "2024-01-09", "2024-01-10"})
+                .has_value());
+    REQUIRE(t.add_double_column("close", {100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0})
+                .has_value());
+    REQUIRE(t.add_int64_column("volume", {10, 10, 10, 10, 10, 100000, 100000, 100000}).has_value());
 
     auto ranked = rank_by_liquidity(t, /*window_days=*/3, /*top_n=*/10);
     REQUIRE(ranked.has_value());
@@ -104,10 +107,10 @@ TEST_CASE("invalid window_days or top_n is rejected", "[liquidity]") {
 
 TEST_CASE("an empty price panel ranks nothing, without erroring", "[liquidity]") {
     Table t;
-    t.add_string_column("ticker", {});
-    t.add_string_column("date", {});
-    t.add_double_column("close", {});
-    t.add_int64_column("volume", {});
+    REQUIRE(t.add_string_column("ticker", {}).has_value());
+    REQUIRE(t.add_string_column("date", {}).has_value());
+    REQUIRE(t.add_double_column("close", {}).has_value());
+    REQUIRE(t.add_int64_column("volume", {}).has_value());
 
     auto ranked = rank_by_liquidity(t, 60, 100);
     REQUIRE(ranked.has_value());
@@ -116,11 +119,31 @@ TEST_CASE("an empty price panel ranks nothing, without erroring", "[liquidity]")
 
 TEST_CASE("a panel missing a required column fails cleanly", "[liquidity]") {
     Table t;
-    t.add_string_column("ticker", {"A"});
-    t.add_string_column("date", {"2024-01-01"});
+    REQUIRE(t.add_string_column("ticker", {"A"}).has_value());
+    REQUIRE(t.add_string_column("date", {"2024-01-01"}).has_value());
     // no close/volume columns
 
     auto ranked = rank_by_liquidity(t, 60, 10);
     REQUIRE_FALSE(ranked.has_value());
     CHECK(ranked.error().code == gm::ErrorCode::kNotFound);
+}
+
+TEST_CASE("tickers tied on median dollar volume break the tie by ticker name, deterministically",
+          "[liquidity]") {
+    // Regression test for the M1 code review finding: the ranking
+    // sort's comparator originally only looked at median_dollar_volume,
+    // so an exact tie's relative order depended on std::unordered_map's
+    // iteration order - itself unspecified and not guaranteed stable
+    // across runs or platforms (ADR §3 principle 2: same inputs must
+    // give bit-identical output). Every tied ticker here has the exact
+    // same dollar volume; the only thing that can make the output
+    // order well-defined is a secondary sort key.
+    auto panel = make_panel({{"ZEBRA", 1000.0}, {"ALPHA", 1000.0}, {"MIKE", 1000.0}}, 5);
+
+    auto ranked = rank_by_liquidity(panel, 60, 10);
+    REQUIRE(ranked.has_value());
+    REQUIRE(ranked->size() == 3);
+    CHECK((*ranked)[0].ticker == "ALPHA");
+    CHECK((*ranked)[1].ticker == "MIKE");
+    CHECK((*ranked)[2].ticker == "ZEBRA");
 }

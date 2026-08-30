@@ -223,7 +223,7 @@ Result<Table> read_parquet(const std::filesystem::path& path) {
                 if (typed) {
                     for (int64_t i = 0; i < typed->length(); ++i) values.push_back(typed->GetString(i));
                 }
-                table.add_string_column(name, std::move(values));
+                if (auto r = table.add_string_column(name, std::move(values)); !r) return tl::unexpected(r.error());
                 break;
             }
             case arrow::Type::INT64: {
@@ -233,7 +233,7 @@ Result<Table> read_parquet(const std::filesystem::path& path) {
                 if (typed) {
                     for (int64_t i = 0; i < typed->length(); ++i) values.push_back(typed->Value(i));
                 }
-                table.add_int64_column(name, std::move(values));
+                if (auto r = table.add_int64_column(name, std::move(values)); !r) return tl::unexpected(r.error());
                 break;
             }
             case arrow::Type::DOUBLE: {
@@ -243,7 +243,7 @@ Result<Table> read_parquet(const std::filesystem::path& path) {
                 if (typed) {
                     for (int64_t i = 0; i < typed->length(); ++i) values.push_back(typed->Value(i));
                 }
-                table.add_double_column(name, std::move(values));
+                if (auto r = table.add_double_column(name, std::move(values)); !r) return tl::unexpected(r.error());
                 break;
             }
             case arrow::Type::BOOL: {
@@ -254,7 +254,7 @@ Result<Table> read_parquet(const std::filesystem::path& path) {
                     for (int64_t i = 0; i < typed->length(); ++i)
                         values.push_back(typed->Value(i) ? 1 : 0);
                 }
-                table.add_bool_column(name, std::move(values));
+                if (auto r = table.add_bool_column(name, std::move(values)); !r) return tl::unexpected(r.error());
                 break;
             }
             default:

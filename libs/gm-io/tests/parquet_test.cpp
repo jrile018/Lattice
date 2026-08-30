@@ -18,10 +18,10 @@ TEST_CASE("write then read round-trips all four column types", "[parquet]") {
     auto path = temp_parquet_path("roundtrip.parquet");
 
     Table original;
-    original.add_string_column("ticker", {"AAPL", "MSFT", "GOOG"});
-    original.add_double_column("close", {185.64, 372.52, 141.80});
-    original.add_int64_column("volume", {82488700, 20214800, 15847200});
-    original.add_bool_column("is_half_day", {0, 1, 0});
+    REQUIRE(original.add_string_column("ticker", {"AAPL", "MSFT", "GOOG"}).has_value());
+    REQUIRE(original.add_double_column("close", {185.64, 372.52, 141.80}).has_value());
+    REQUIRE(original.add_int64_column("volume", {82488700, 20214800, 15847200}).has_value());
+    REQUIRE(original.add_bool_column("is_half_day", {0, 1, 0}).has_value());
 
     auto write_result = write_parquet(original, path);
     REQUIRE(write_result.has_value());
@@ -59,8 +59,8 @@ TEST_CASE("round-trips a table with zero rows", "[parquet]") {
     auto path = temp_parquet_path("empty_rows.parquet");
 
     Table original;
-    original.add_string_column("ticker", {});
-    original.add_double_column("close", {});
+    REQUIRE(original.add_string_column("ticker", {}).has_value());
+    REQUIRE(original.add_double_column("close", {}).has_value());
 
     auto write_result = write_parquet(original, path);
     REQUIRE(write_result.has_value());
@@ -84,7 +84,7 @@ TEST_CASE("write creates missing parent directories", "[parquet]") {
     std::filesystem::remove_all(temp_parquet_path("nested"));
 
     Table t;
-    t.add_int64_column("x", {1, 2, 3});
+    REQUIRE(t.add_int64_column("x", {1, 2, 3}).has_value());
 
     auto write_result = write_parquet(t, path);
     REQUIRE(write_result.has_value());
