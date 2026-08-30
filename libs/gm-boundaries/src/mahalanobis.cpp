@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <vector>
 
 namespace gm::boundaries {
@@ -120,10 +121,23 @@ Result<MahalanobisScore> score_mahalanobis(const MahalanobisFit& fit, const Eige
     if (distance_squared < 0.0) distance_squared = 0.0;  // floating-point guard; must be non-negative
     double distance = std::sqrt(distance_squared);
 
-    boost::math::chi_squared_distribution<double> chi2(static_cast<double>(fit.degrees_of_freedom));
-    double p_value = boost::math::cdf(boost::math::complement(chi2, distance_squared));
-    double critical_distance_squared = boost::math::quantile(chi2, 1.0 - alpha);
-    double critical_distance = std::sqrt(critical_distance_squared);
+    // Boost.Math's distribution functions can throw on pathological
+    // inputs (extreme distance_squared feeding the incomplete gamma
+    // function's internal series/continued-fraction evaluation) even
+    // though every guard above is already satisfied - guarded here
+    // rather than left to propagate past this function's Result<T>
+    // boundary (ADR-019: no exceptions past a stage's error boundary).
+    double p_value = 0.0, critical_distance = 0.0;
+    try {
+        boost::math::chi_squared_distribution<double> chi2(static_cast<double>(fit.degrees_of_freedom));
+        p_value = boost::math::cdf(boost::math::complement(chi2, distance_squared));
+        double critical_distance_squared = boost::math::quantile(chi2, 1.0 - alpha);
+        critical_distance = std::sqrt(critical_distance_squared);
+    } catch (const std::exception& e) {
+        return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure,
+                                               "chi-squared distribution evaluation failed",
+                                               e.what()));
+    }
 
     double depth = distance - critical_distance;
     bool inside = depth <= 0.0;

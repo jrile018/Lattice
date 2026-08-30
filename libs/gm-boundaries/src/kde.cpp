@@ -84,7 +84,13 @@ Result<KdeFit> fit_kde(const Eigen::MatrixXd& points, double alpha) {
     // header comment for why this matters at real View B scale.
     const Eigen::Index sample_size =
         std::min(n, static_cast<Eigen::Index>(kde_max_level_sample_points()));
-    const Eigen::Index stride = std::max<Eigen::Index>(1, n / sample_size);
+    // Ceiling division, not floor: floor(n/sample_size) as the stride
+    // under-strides (a real bug caught by the M3 code review) - e.g.
+    // n=756, sample_size=200 gives stride=756/200=3 (floor), and
+    // striding by 3 actually visits ceil(756/3)=252 points, 26% over
+    // the intended cap. Ceiling division (n+sample_size-1)/sample_size
+    // gives stride=4 here, visiting ceil(756/4)=189 <= 200 points.
+    const Eigen::Index stride = std::max<Eigen::Index>(1, (n + sample_size - 1) / sample_size);
 
     std::vector<double> sample_log_densities;
     sample_log_densities.reserve(static_cast<std::size_t>(sample_size));

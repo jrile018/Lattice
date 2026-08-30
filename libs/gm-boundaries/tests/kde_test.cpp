@@ -101,6 +101,41 @@ TEST_CASE("roughly (1-alpha) of the training points score inside their own fit",
     CHECK(inside_count >= 36);
 }
 
+TEST_CASE("the level-sampling stride path (N > kde_max_level_sample_points) behaves correctly",
+          "[kde]") {
+    // Regression test for the M3 code review finding: the striding
+    // branch (only reached when N exceeds the cap) had zero test
+    // coverage, and its stride calculation had a real bug (floor
+    // division under-strided, visiting up to ~26% more points than the
+    // intended cap). N=300 here is comfortably above the 200 cap, so
+    // this actually exercises the sampled path, not the exact one.
+    REQUIRE(300 > gm::boundaries::kde_max_level_sample_points());
+
+    Eigen::MatrixXd points(300, 2);
+    for (int i = 0; i < 300; ++i) {
+        double angle = 2.0 * 3.14159265358979 * static_cast<double>(i) / 300.0;
+        points(i, 0) = std::cos(angle);
+        points(i, 1) = std::sin(angle);
+    }
+
+    auto fit = fit_kde(points, 0.05);
+    REQUIRE(fit.has_value());
+    CHECK(fit->level > 0.0);
+    CHECK(std::isfinite(fit->level));
+
+    // Coverage should still land close to the nominal (1-alpha) rate
+    // even from a strided sample of the level, not just the exact path.
+    int inside_count = 0;
+    for (int i = 0; i < 300; ++i) {
+        Eigen::VectorXd p = points.row(i);
+        auto score = score_kde(*fit, p);
+        REQUIRE(score.has_value());
+        if (score->inside) ++inside_count;
+    }
+    double coverage = static_cast<double>(inside_count) / 300.0;
+    CHECK(coverage > 0.85);  // nominal 0.95, generous slack for sampling noise
+}
+
 TEST_CASE("fewer than 2 points is rejected", "[kde]") {
     Eigen::MatrixXd points(1, 2);
     points.setZero();
