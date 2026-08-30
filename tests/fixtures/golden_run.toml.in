@@ -41,3 +41,12 @@ cache_dir = "@GM_REPO_ROOT@/data/raw/price_cache"
 # schema, ADR §8.2) - only the window needed shrinking to fit the range.
 window_days = 10
 embedding_dims = 3
+
+[boundaries]
+# View B needs at least (lookback+1) frames of a ticker's own history
+# to score a single point; the fixture's geometry only produces ~12
+# frames total (21 trading days - window_days=10 + 1), so the real
+# run's default (756, ADR §6.4) would score nothing here. Small enough
+# to guarantee multiple real View B points against this fixture.
+alpha = 0.05
+view_b_lookback_days = 3

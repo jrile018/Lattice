@@ -106,6 +106,8 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
             } else if (std::string_view{stage} == "gm-geometry") {
                 CHECK(std::filesystem::exists(run_dir / stage / "geometry.parquet"));
                 CHECK(std::filesystem::exists(run_dir / stage / "regime.parquet"));
+            } else if (std::string_view{stage} == "gm-boundaries") {
+                CHECK(std::filesystem::exists(run_dir / stage / "scores.parquet"));
             } else {
                 std::filesystem::path stub_artifact =
                     run_dir / stage / (std::string{stage} + ".stub.json");
@@ -164,6 +166,41 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
         // (gm-geometry's documented convention) - its structural_change
         // is exactly 0, not a meaningless residual against nothing.
         CHECK((*structural_change)[0] == 0.0);
+    }
+
+    SECTION("gm-boundaries scored both views with both estimators") {
+        auto boundaries_manifest = gm::Manifest::read(run_dir / "gm-boundaries" / "manifest.json");
+        REQUIRE(boundaries_manifest.has_value());
+
+        REQUIRE(boundaries_manifest->raw().contains("view_a_frames_scored"));
+        CHECK(boundaries_manifest->raw()["view_a_frames_scored"].get<std::int64_t>() > 0);
+        // view_b_lookback_days=3 in the fixture (see golden_run.toml.in)
+        // is small enough relative to its ~12 geometry frames that
+        // every one of the fixture's 10 tickers should get at least one
+        // real View B point scored, not zero.
+        CHECK(boundaries_manifest->raw()["view_b_points_scored"].get<std::int64_t>() > 0);
+
+        auto scores = gm::io::read_parquet(run_dir / "gm-boundaries" / "scores.parquet");
+        REQUIRE(scores.has_value());
+
+        auto views = scores->string_column("view");
+        auto estimators = scores->string_column("estimator");
+        REQUIRE(views.has_value());
+        REQUIRE(estimators.has_value());
+
+        bool has_view_a = false, has_view_b = false, has_mahalanobis = false, has_kde = false;
+        for (const auto& v : *views) {
+            if (v == "A") has_view_a = true;
+            if (v == "B") has_view_b = true;
+        }
+        for (const auto& e : *estimators) {
+            if (e == "mahalanobis") has_mahalanobis = true;
+            if (e == "kde") has_kde = true;
+        }
+        CHECK(has_view_a);
+        CHECK(has_view_b);
+        CHECK(has_mahalanobis);
+        CHECK(has_kde);
     }
 
     std::filesystem::remove_all(run_dir);

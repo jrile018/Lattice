@@ -29,3 +29,9 @@ liquidity_top_n = 100
 [geometry]
 window_days = 60
 embedding_dims = 3
+
+[boundaries]
+alpha = 0.05
+# ADR §6.4's default trailing-history length for View B (~3 years of
+# trading days).
+view_b_lookback_days = 756
