@@ -40,7 +40,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <set>
 
 namespace {
@@ -152,8 +151,22 @@ gm::Result<TickerBars> fetch_and_screen(gm::io::HttpCache& cache, const gm::Nyse
             double adjclose = adjclose_v.get<double>();
 
             if (have_prev && prev_adjclose > 0.0) {
-                double log_return = std::log(adjclose / prev_adjclose);
-                if (std::abs(log_return) > std::log(1.5)) {  // +/-50% move in the adjusted series
+                // ADR-015/§7.2 specify a symmetric +/-50% price-ratio
+                // bound, not a symmetric bound on the LOG return - those
+                // are different things: |log(ratio)| > log(1.5) triggers
+                // on any drop beyond -33.3%, not -50%, because a fixed
+                // log-return magnitude corresponds to +50% on the
+                // upside but only -33.3% on the downside (ratios 1.5 and
+                // 1/1.5 aren't symmetric around 1.0 the way +50%/-50%
+                // are). Caught by inspecting this milestone's own real
+                // rejected-ticker report: WST's genuine -38.2% single-
+                // day move (a real, large, legitimate price change) was
+                // being rejected by the log-based check even though it
+                // is well within the ADR's stated +/-50% tolerance.
+                // Comparing the raw ratio against [0.5, 1.5] directly is
+                // both correct and simpler than the log formulation.
+                double ratio = adjclose / prev_adjclose;
+                if (ratio > 1.5 || ratio < 0.5) {
                     return tl::unexpected(gm::Error::make(
                         gm::ErrorCode::kValidationFailure,
                         "adjusted-close day-over-day return exceeds +/-50% (ADR-015 screen)",
