@@ -175,22 +175,26 @@ Result<Table> read_parquet(const std::filesystem::path& path) {
     }
     std::shared_ptr<arrow::io::ReadableFile> infile = *maybe_infile;
 
-    std::unique_ptr<parquet::arrow::FileReader> reader;
-    arrow::Status open_status =
-        parquet::arrow::OpenFile(infile, arrow::default_memory_pool(), &reader);
-    if (!open_status.ok()) {
+    // parquet::arrow::OpenFile and FileReader::ReadTable both moved to
+    // arrow::Result<T>-returning signatures (the old Status-with-
+    // out-param overloads are deprecated as of Arrow 24.0.0, and this
+    // build - Arrow 25.0.1 - errors on the deprecation warning under
+    // -Werror per ADR-004).
+    auto maybe_reader = parquet::arrow::OpenFile(infile, arrow::default_memory_pool());
+    if (!maybe_reader.ok()) {
         return tl::unexpected(arrow_status_error(
             gm::ErrorCode::kParseFailure, "failed to open parquet reader (" + path.string() + ")",
-            open_status));
+            maybe_reader.status()));
     }
+    std::unique_ptr<parquet::arrow::FileReader> reader = std::move(*maybe_reader);
 
-    std::shared_ptr<arrow::Table> arrow_table;
-    arrow::Status read_status = reader->ReadTable(&arrow_table);
-    if (!read_status.ok()) {
+    auto maybe_table = reader->ReadTable();
+    if (!maybe_table.ok()) {
         return tl::unexpected(arrow_status_error(
             gm::ErrorCode::kParseFailure, "failed reading parquet table (" + path.string() + ")",
-            read_status));
+            maybe_table.status()));
     }
+    std::shared_ptr<arrow::Table> arrow_table = *maybe_table;
 
     // Combine to a single chunk per column so each column has exactly
     // one contiguous array to convert, rather than N row-group chunks.
