@@ -39,10 +39,11 @@ constexpr std::array<const char*, 8> kExpectedStages = {
     "gm-boundaries", "gm-signals", "gm-backtest", "gm-report",
 };
 
-// gm-universe and gm-ingest graduated from M0 stubs to real M1
-// implementations; the other 6 have not yet (see ADR.md §13
-// milestones). The per-stage artifact check below just needs to know
-// which real file each graduated stage produces instead of a
+// gm-universe/gm-ingest (M1), gm-geometry (M2), and gm-boundaries/
+// gm-signals (M3-M4) have graduated from M0 stubs to real
+// implementations; gm-backtest and gm-report have not yet (see ADR.md
+// §13 milestones). The per-stage artifact check below just needs to
+// know which real file each graduated stage produces instead of a
 // `<stage>.stub.json` placeholder - this is what lets one golden test
 // track the pipeline's incremental rollout without a rewrite each time
 // another stage graduates.
@@ -108,6 +109,9 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
                 CHECK(std::filesystem::exists(run_dir / stage / "regime.parquet"));
             } else if (std::string_view{stage} == "gm-boundaries") {
                 CHECK(std::filesystem::exists(run_dir / stage / "scores.parquet"));
+            } else if (std::string_view{stage} == "gm-signals") {
+                CHECK(std::filesystem::exists(run_dir / stage / "spreads.parquet"));
+                CHECK(std::filesystem::exists(run_dir / stage / "excursions.parquet"));
             } else {
                 std::filesystem::path stub_artifact =
                     run_dir / stage / (std::string{stage} + ".stub.json");
