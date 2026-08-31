@@ -86,7 +86,7 @@ Result<std::vector<Edge>> knn_and_mst_edges(const Eigen::MatrixXd& D, int k) {
     }
 
     const int nn = static_cast<int>(n);
-    std::set<std::pair<int, int>> edge_set;
+    std::set<std::pair<int, int>> knn_set;
 
     // Symmetric closure of each node's own k-NN set: node i's k nearest
     // neighbours are found by sorting ITS OWN row, independent of
@@ -101,21 +101,27 @@ Result<std::vector<Edge>> knn_and_mst_edges(const Eigen::MatrixXd& D, int k) {
         std::partial_sort(others.begin(), others.begin() + k, others.end(),
                            [&](int a, int b) { return D(i, a) < D(i, b); });
         for (int idx = 0; idx < k; ++idx) {
-            edge_set.insert(canonical(i, others[static_cast<std::size_t>(idx)]));
+            knn_set.insert(canonical(i, others[static_cast<std::size_t>(idx)]));
         }
     }
 
     std::set<std::pair<int, int>> mst = minimum_spanning_tree_edges(D);
-    // Every MST edge is included even when it falls outside every
-    // endpoint's own k-NN set (a legitimate "bridge" between otherwise
-    // distant clusters) - the viewer's MST overlay needs the complete
-    // tree, not just its k-NN-visible portion.
+
+    // Union of both sets for the returned edge list - every MST edge is
+    // included even when it falls outside every endpoint's own k-NN set
+    // (a legitimate "bridge" between otherwise distant clusters, needed
+    // for the viewer's MST overlay to render the complete tree) - but
+    // in_knn and in_mst are tracked and reported independently, so a
+    // consumer that only wants genuine k-nearest-neighbour relationships
+    // (gm-signals' peer-basket selection) can filter on in_knn alone
+    // without accidentally picking up an MST-only bridge.
+    std::set<std::pair<int, int>> edge_set = knn_set;
     for (const auto& e : mst) edge_set.insert(e);
 
     std::vector<Edge> result;
     result.reserve(edge_set.size());
     for (const auto& [i, j] : edge_set) {
-        result.push_back(Edge{i, j, D(i, j), mst.count({i, j}) > 0});
+        result.push_back(Edge{i, j, D(i, j), mst.count({i, j}) > 0, knn_set.count({i, j}) > 0});
     }
     return result;
 }

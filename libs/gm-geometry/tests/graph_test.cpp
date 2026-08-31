@@ -97,15 +97,23 @@ TEST_CASE("MST bridges two k=1-disconnected clusters with the cheapest cross-clu
     REQUIRE(result.has_value());
 
     // The bridge edge must be present at all (proving MST edges outside
-    // the k-NN symmetric closure are still included) and marked in_mst.
+    // the k-NN symmetric closure are still included), marked in_mst,
+    // and - the actual point of this test - marked in_knn=false: it is
+    // NOT a genuine nearest-neighbour relationship for either endpoint,
+    // only a structural necessity for connecting the tree. A consumer
+    // that used in_mst as a proxy for "these are similar names" (rather
+    // than filtering on in_knn) would get this one wrong.
     const Edge* bridge = find_edge(*result, 1, 2);
     REQUIRE(bridge != nullptr);
     CHECK(bridge->in_mst);
+    CHECK_FALSE(bridge->in_knn);
     CHECK(bridge->distance == 99.0);
 
     // The two within-cluster edges are both k-NN edges AND MST edges.
     CHECK(find_edge(*result, 0, 1)->in_mst);
+    CHECK(find_edge(*result, 0, 1)->in_knn);
     CHECK(find_edge(*result, 2, 3)->in_mst);
+    CHECK(find_edge(*result, 2, 3)->in_knn);
 
     // Exactly 3 edges total for 4 nodes' worth of MST, with nothing
     // extra sneaking in (e.g. the non-bridge cross-cluster pairs).
@@ -133,6 +141,15 @@ TEST_CASE("a k-NN edge that the MST does not need is reported with in_mst=false"
     CHECK(find_edge(*result, 0, 1)->in_mst); // AB
     CHECK(find_edge(*result, 1, 2)->in_mst); // BC
     CHECK_FALSE(find_edge(*result, 0, 2)->in_mst); // AC - the redundant edge
+
+    // All three are genuine k-NN edges at k=2 with only 3 nodes (every
+    // other node is, trivially, among the top 2 nearest) - AC being
+    // excluded from the MST does not make it any less a real neighbour
+    // relationship, which is exactly the distinction in_knn vs in_mst
+    // exists to preserve.
+    CHECK(find_edge(*result, 0, 1)->in_knn);
+    CHECK(find_edge(*result, 1, 2)->in_knn);
+    CHECK(find_edge(*result, 0, 2)->in_knn);
 }
 
 TEST_CASE("a non-square matrix is rejected", "[graph]") {

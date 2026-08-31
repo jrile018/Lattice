@@ -271,6 +271,7 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     std::vector<std::string> edge_dates, edge_ticker_a, edge_ticker_b;
     std::vector<double> edge_distances;
     std::vector<std::uint8_t> edge_in_mst;
+    std::vector<std::uint8_t> edge_in_knn;
 
     std::optional<Eigen::MatrixXd> previous_aligned;
 
@@ -306,6 +307,7 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
             edge_ticker_b.push_back(active_tickers[static_cast<std::size_t>(e.j)]);
             edge_distances.push_back(e.distance);
             edge_in_mst.push_back(e.in_mst ? 1 : 0);
+            edge_in_knn.push_back(e.in_knn ? 1 : 0);
         }
 
         auto embedding = gm::geometry::classical_mds(*dist, static_cast<int>(k));
@@ -361,6 +363,7 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     if (auto r = edges_table.add_double_column("distance", std::move(edge_distances)); !r)
         return tl::unexpected(r.error());
     if (auto r = edges_table.add_bool_column("in_mst", std::move(edge_in_mst)); !r) return tl::unexpected(r.error());
+    if (auto r = edges_table.add_bool_column("in_knn", std::move(edge_in_knn)); !r) return tl::unexpected(r.error());
 
     auto write3 = gm::io::write_parquet(edges_table, output_dir / "edges.parquet");
     if (!write3) return tl::unexpected(write3.error());
