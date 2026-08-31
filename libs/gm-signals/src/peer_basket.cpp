@@ -2,7 +2,6 @@
 
 #include <osqp/osqp.h>
 
-#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -112,10 +111,18 @@ Result<Eigen::VectorXd> fit_peer_basket_weights(const Eigen::VectorXd& target_re
     }
 
     OSQPSettings* settings = OSQPSettings_new();
-    settings->verbose = 1; // TEMP DEBUG
-    std::fprintf(stderr, "TEMP DEBUG defaults: max_iter=%d eps_abs=%g eps_rel=%g rho=%g sigma=%g alpha=%g scaling=%d\n",
-                 (int)settings->max_iter, settings->eps_abs, settings->eps_rel, settings->rho,
-                 settings->sigma, settings->alpha, (int)settings->scaling);
+    settings->verbose = 0;
+    // OSQP v1.0 defaults to a duality-gap termination criterion
+    // (check_dualgap=1) alongside the classical primal/dual-residual
+    // one. On these small, cleanly-solved baskets the residuals
+    // converge to near machine precision almost immediately (~1e-15),
+    // but the gap computation itself came back NaN for the entire run
+    // in testing, so termination never fired and every call ran to
+    // max_iter despite already holding a correct solution. Disabling
+    // it falls back to the residual-based criterion alone, which is
+    // both the classical, well-understood ADMM termination test and
+    // the one that was actually behaving correctly here.
+    settings->check_dualgap = 0;
 
     OSQPSolver* solver = nullptr;
     OSQPInt setup_flag = osqp_setup(&solver, p_mat, q_vec.data(), a_mat, l_vec.data(), u_vec.data(), kk + 1, kk,
