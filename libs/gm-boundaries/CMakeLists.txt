@@ -3,6 +3,7 @@ find_package(boost_math CONFIG REQUIRED)
 
 add_library(gm-boundaries-lib STATIC
   src/mahalanobis.cpp
+  src/fastmcd.cpp
   src/kde.cpp
   src/marching_tetrahedra.cpp
 )

@@ -14,6 +14,7 @@
 
 #include <gm-boundaries/kde.hpp>
 #include <gm-boundaries/mahalanobis.hpp>
+#include <gm-boundaries/fastmcd.hpp>
 #include <gm-core/stage_main.hpp>
 #include <gm-io/parquet.hpp>
 #include <gm-io/table.hpp>
@@ -101,6 +102,7 @@ struct ScoreRows {
     // (view_a_frames_scored/view_b_points_scored * 2 estimators).
     std::size_t mahalanobis_failures = 0;
     std::size_t kde_failures = 0;
+    std::size_t fastmcd_failures = 0;
 
     void add(const std::string& date, const std::string& ticker, const char* view,
              const char* estimator, double depth, double pvalue, bool inside) {
@@ -144,6 +146,18 @@ void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, con
         }
     } else {
         ++rows.kde_failures;
+    }
+
+    auto mcd_fit = gm::boundaries::fit_fastmcd(training);
+    if (mcd_fit) {
+        auto score = gm::boundaries::score_fastmcd(*mcd_fit, query, alpha);
+        if (score) {
+            rows.add(date, ticker, view, "fastmcd", score->depth, score->p_value, score->inside);
+        } else {
+            ++rows.fastmcd_failures;
+        }
+    } else {
+        ++rows.fastmcd_failures;
     }
 }
 
@@ -203,6 +217,7 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     // to be re-verified by whoever edits this function next.
     std::size_t mahalanobis_failures = rows.mahalanobis_failures;
     std::size_t kde_failures = rows.kde_failures;
+    std::size_t fastmcd_failures = rows.fastmcd_failures;
 
     gm::io::Table scores;
     if (auto r = scores.add_string_column("date", std::move(rows.dates)); !r) return tl::unexpected(r.error());
@@ -229,6 +244,7 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     // useful confirmation, not just an absence of information.
     manifest.set_int("mahalanobis_failures", static_cast<std::int64_t>(mahalanobis_failures));
     manifest.set_int("kde_failures", static_cast<std::int64_t>(kde_failures));
+    manifest.set_int("fastmcd_failures", static_cast<std::int64_t>(fastmcd_failures));
 
     return {};
 }
