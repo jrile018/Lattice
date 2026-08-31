@@ -126,15 +126,29 @@ TEST_CASE("a near-unit-root fit is rejected even though phi is nominally in (0,1
     // days) on real data, which is nominally inside (0,1) but makes
     // mu=c/(1-phi) numerically explosive, producing an absurd z-score
     // (observed: -222.8) for a spread that was not remotely that many
-    // standard deviations from anything. Reproduced here by simulating
-    // from a TRUE theta near zero (theta=1e-6, essentially a random
-    // walk over a short window) - the fitted phi should land close
-    // enough to 1 that the near-unit-root guard rejects it, the same
-    // way a short window's estimation noise can push a genuinely
-    // slower (but not this extreme) process's ESTIMATED phi into the
-    // same unreliable regime by chance.
-    Eigen::VectorXd path = simulate_ou_path(/*theta=*/1e-6, /*mu=*/2.0, /*sigma=*/0.5, /*dt=*/1.0,
-                                             /*n=*/60, /*seed=*/99);
+    // standard deviations from anything.
+    //
+    // A RANDOM near-unit-root simulation is unsuitable here (tried
+    // first, and correctly caught as flaky by CI): with theta this
+    // tiny, 60 simulated points behave like a short random walk, whose
+    // OLS-fitted phi has enough sampling variance to NOT reliably land
+    // within kMinOneMinusPhi of 1 - it's an estimation-noise phenomenon,
+    // not a deterministic function of the true theta alone. Instead,
+    // this constructs a noise-free EXACT geometric decay s_t = mu +
+    // A*phi_true^t: with zero residual noise, OLS recovers phi_true
+    // exactly (Cov(s_t,s_{t-1})/Var(s_{t-1}) reduces algebraically to
+    // phi_true when current_centered = phi_true * lagged_centered
+    // exactly), giving a deterministic, zero-variance test of the
+    // rejection boundary itself - not a claim that real data looks
+    // like this.
+    const double true_mu = 2.0;
+    const double phi_true = 1.0 - 2e-5; // comfortably below the 1e-4 rejection floor
+    Eigen::VectorXd path(60);
+    double amplitude = 1.0;
+    for (int t = 0; t < 60; ++t) {
+        path(t) = true_mu + amplitude * std::pow(phi_true, t);
+    }
+
     auto fit = fit_ou(path, 1.0);
     REQUIRE_FALSE(fit.has_value());
 }
