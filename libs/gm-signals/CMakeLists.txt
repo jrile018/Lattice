@@ -1,10 +1,12 @@
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(osqp CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 add_library(gm-signals-lib STATIC
   src/peer_basket.cpp
   src/ou_fit.cpp
   src/excursion.cpp
+  src/earnings.cpp
 )
 add_library(gm::signals ALIAS gm-signals-lib)
 
@@ -16,7 +18,9 @@ target_include_directories(gm-signals-lib
 target_link_libraries(gm-signals-lib
   PUBLIC
     gm::core
+    gm::io
     Eigen3::Eigen
+    nlohmann_json::nlohmann_json
   PRIVATE
     # osqp's vcpkg port only guarantees the shared-lib target
     # (osqp::osqp) OR the static one (osqp::osqpstatic) depending on
