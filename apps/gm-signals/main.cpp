@@ -23,8 +23,13 @@
 //      per ticker over its full z-score history.
 //
 // Writes spreads.parquet (date, ticker, z, spread, half_life,
-// n_neighbors) and excursions.parquet (ticker, start_date, end_date,
-// peak_depth, reverted, duration_days).
+// n_neighbors), baskets.parquet (date, ticker, neighbor_ticker, weight -
+// the entry-day peer-basket weights a downstream consumer needs to
+// reconstruct a FIXED-basket spread series for a held position, since
+// spreads.parquet's own `spread` column is refit fresh every day and
+// is only valid for THAT day's z-score, not for computing a held
+// position's P&L across multiple days), and excursions.parquet
+// (ticker, start_date, end_date, peak_depth, reverted, duration_days).
 
 #include <gm-core/stage_main.hpp>
 #include <gm-io/parquet.hpp>
@@ -134,6 +139,8 @@ struct SpreadRow {
     double spread;
     double half_life;
     int n_neighbors;
+    std::vector<std::string> neighbor_tickers; // parallel to neighbor_weights
+    std::vector<double> neighbor_weights;
 };
 
 /// Computes ticker `target`'s spread and z-score at date index `t`
@@ -219,7 +226,9 @@ std::optional<SpreadRow> compute_spread_row(const std::string& target, const std
     auto z = gm::signals::ou_zscore(*ou, s_today);
     if (!z) return std::nullopt;
 
-    return SpreadRow{today, target, *z, s_today, ou->half_life, static_cast<int>(k)};
+    std::vector<double> weight_values(weights->data(), weights->data() + weights->size());
+    return SpreadRow{today,      target,  *z, s_today, ou->half_life, static_cast<int>(k),
+                      neighbors, std::move(weight_values)};
 }
 
 gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::path& output_dir,
@@ -261,6 +270,23 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     std::vector<std::string> out_dates, out_tickers;
     std::vector<double> out_z, out_spread, out_half_life;
     std::vector<std::int64_t> out_n_neighbors;
+
+    // Per (date,ticker), one row per basket neighbour: the ENTRY-DAY
+    // weights a downstream consumer (gm-backtest) needs to reconstruct
+    // a FIXED-basket spread series for a held position - spreads.parquet's
+    // own `spread` column is refit fresh every single day (a new causal
+    // window, and even a different neighbour SET, since gm-geometry's
+    // k-NN graph itself changes day to day), so spread[t]-spread[t-1]
+    // does NOT represent one consistent position's mark-to-market P&L;
+    // it can silently mix a real price move with an artifact of the
+    // reference basket changing out from under the position entirely.
+    // Found the hard way on the real 16-year backtest: a single day
+    // where several unrelated tickers' spreads jumped ~2 in log-space
+    // simultaneously - traced to a wholesale k-NN neighbour-set swap on
+    // that date (see the git history for the specific case), not any
+    // real market move.
+    std::vector<std::string> basket_dates, basket_tickers, basket_neighbor_tickers;
+    std::vector<double> basket_weights;
 
     // ticker -> chronological z-score series, kept alongside the dates
     // they correspond to - needed to run excursion detection per
@@ -316,6 +342,13 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
             out_half_life.push_back(row->half_life);
             out_n_neighbors.push_back(row->n_neighbors);
 
+            for (std::size_t j = 0; j < row->neighbor_tickers.size(); ++j) {
+                basket_dates.push_back(row->date);
+                basket_tickers.push_back(row->ticker);
+                basket_neighbor_tickers.push_back(row->neighbor_tickers[j]);
+                basket_weights.push_back(row->neighbor_weights[j]);
+            }
+
             zscore_dates_by_ticker[ticker].push_back(row->date);
             zscore_series_by_ticker[ticker].push_back(row->z);
         }
@@ -335,6 +368,19 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
 
     auto write1 = gm::io::write_parquet(spreads_table, output_dir / "spreads.parquet");
     if (!write1) return tl::unexpected(write1.error());
+
+    gm::io::Table baskets_table;
+    if (auto r = baskets_table.add_string_column("date", std::move(basket_dates)); !r)
+        return tl::unexpected(r.error());
+    if (auto r = baskets_table.add_string_column("ticker", std::move(basket_tickers)); !r)
+        return tl::unexpected(r.error());
+    if (auto r = baskets_table.add_string_column("neighbor_ticker", std::move(basket_neighbor_tickers)); !r)
+        return tl::unexpected(r.error());
+    if (auto r = baskets_table.add_double_column("weight", std::move(basket_weights)); !r)
+        return tl::unexpected(r.error());
+
+    auto write_baskets = gm::io::write_parquet(baskets_table, output_dir / "baskets.parquet");
+    if (!write_baskets) return tl::unexpected(write_baskets.error());
 
     // Excursion detection, per ticker, over its own chronological
     // z-score history built above.
@@ -379,6 +425,7 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
 
     manifest.set_int("active_universe_size", static_cast<std::int64_t>(active_universe->size()));
     manifest.set_int("rows_written", static_cast<std::int64_t>(spreads_table.num_rows()));
+    manifest.set_int("basket_rows_written", static_cast<std::int64_t>(baskets_table.num_rows()));
     manifest.set_int("rows_skipped_incomplete", rows_skipped_incomplete);
     manifest.set_int("excursions_written", static_cast<std::int64_t>(excursions_table.num_rows()));
     manifest.set_int("spread_fit_window_days", window);
