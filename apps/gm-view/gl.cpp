@@ -49,9 +49,16 @@ Result<std::uint32_t> compile_stage(GLenum stage, const std::string& src) {
         GLsizei len = 0;
         glGetShaderInfoLog(shader, sizeof(log), &len, log);
         glDeleteShader(shader);
-        return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure,
-                                               "GLSL shader compilation failed",
-                                               std::string(log, static_cast<std::size_t>(len))));
+        std::string detail(log, static_cast<std::size_t>(len));
+        // glGetShaderInfoLog itself respects the buffer size (no
+        // overrun risk), but a real GLSL error - especially with macro
+        // expansion - can genuinely exceed 1024 bytes; say so rather
+        // than silently handing back a log that just stops mid-message.
+        if (static_cast<std::size_t>(len) >= sizeof(log) - 1) {
+            detail += "\n[...shader error log truncated at 1024 bytes...]";
+        }
+        return tl::unexpected(
+            gm::Error::make(gm::ErrorCode::kNumericFailure, "GLSL shader compilation failed", detail));
     }
     return shader;
 }
@@ -83,9 +90,12 @@ Result<std::uint32_t> compile_shader_program(const std::string& vertex_src,
         GLsizei len = 0;
         glGetProgramInfoLog(program, sizeof(log), &len, log);
         glDeleteProgram(program);
-        return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure,
-                                               "GLSL shader program link failed",
-                                               std::string(log, static_cast<std::size_t>(len))));
+        std::string detail(log, static_cast<std::size_t>(len));
+        if (static_cast<std::size_t>(len) >= sizeof(log) - 1) {
+            detail += "\n[...program link log truncated at 1024 bytes...]";
+        }
+        return tl::unexpected(
+            gm::Error::make(gm::ErrorCode::kNumericFailure, "GLSL shader program link failed", detail));
     }
     return program;
 }

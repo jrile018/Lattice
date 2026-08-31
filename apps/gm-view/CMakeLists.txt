@@ -24,3 +24,7 @@ target_link_libraries(gm-view
 
 gm_inject_build_info(gm-view)
 install(TARGETS gm-view RUNTIME DESTINATION bin)
+
+if (GM_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()

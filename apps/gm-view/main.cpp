@@ -18,6 +18,10 @@
 #include <gm-core/error.hpp>
 #include <spdlog/spdlog.h>
 
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -119,12 +123,47 @@ int main(int argc, char** argv) {
     int start_frame = 0;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--start-frame" && i + 1 < argc) {
-            start_frame = std::atoi(argv[++i]);
+        if (arg == "--start-frame") {
+            if (i + 1 >= argc) {
+                spdlog::error("gm-view: --start-frame requires a numeric argument");
+                return 1;
+            }
+            // atoi silently returns 0 on any non-numeric input ("abc",
+            // or a typo'd flag like "--start-fame" that this loop would
+            // otherwise swallow as runs_base_dir) - strtol with an
+            // endptr check tells a genuine parse failure apart from a
+            // legitimate "0".
+            const char* arg_str = argv[++i];
+            char* end = nullptr;
+            errno = 0;
+            long parsed = std::strtol(arg_str, &end, 10);
+            if (end == arg_str || *end != '\0' || errno == ERANGE || parsed < 0 ||
+                parsed > std::numeric_limits<int>::max()) {
+                spdlog::error("gm-view: --start-frame must be a non-negative integer, got '{}'",
+                               arg_str);
+                return 1;
+            }
+            start_frame = static_cast<int>(parsed);
         } else {
             runs_base_dir = arg;
         }
     }
+
+#if defined(__linux__)
+    // On Linux, glfwInit() against neither an X11 nor a Wayland display
+    // (a bare SSH session, a CI box, a container with no compositor)
+    // fails in a way that's easy to misread as a build or driver
+    // problem rather than "there's nowhere to put a window." Check the
+    // obvious cause first and say so plainly - gm-view is genuinely a
+    // GUI application with no headless mode, not a bug to work around.
+    if (std::getenv("DISPLAY") == nullptr && std::getenv("WAYLAND_DISPLAY") == nullptr) {
+        spdlog::error(
+            "gm-view: no DISPLAY or WAYLAND_DISPLAY set - this is a GUI application and needs "
+            "an X11 or Wayland session to open a window (e.g. run against a real desktop "
+            "session's display, such as DISPLAY=:0)");
+        return 1;
+    }
+#endif
 
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) {

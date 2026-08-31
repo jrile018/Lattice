@@ -2,6 +2,8 @@
 
 #include <gm-io/parquet.hpp>
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <map>
 
@@ -76,11 +78,24 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
         if (regime_dates && sc) {
             result.regime_dates.assign(regime_dates->begin(), regime_dates->end());
             result.structural_change.assign(sc->begin(), sc->end());
+        } else {
+            // Distinguish "the file doesn't exist yet" (read_parquet
+            // itself fails below, expected for a run gm-geometry hasn't
+            // reached) from "the file exists but doesn't look like a
+            // regime table" (a real schema problem) - the latter would
+            // otherwise silently present as an empty Evolution tab with
+            // no indication anything was wrong, and a user could easily
+            // mistake that for "the run just hasn't finished yet."
+            spdlog::warn(
+                "gm-view: {} exists but is missing the expected 'date'/'structural_change' "
+                "columns - the Evolution tab's regime strip will be empty",
+                regime_path.string());
         }
-        // A malformed regime.parquet (wrong columns) is tolerated as
-        // "no regime strip to show," not a load failure - the manifold
-        // view itself doesn't need it, only the Evolution tab's strip.
     }
+    // A missing regime.parquet (the common case: gm-geometry hasn't
+    // produced it yet, or this run predates the metric) is tolerated
+    // silently as "no regime strip to show" - only an unexpected schema
+    // on a file that DOES exist is worth telling the user about.
 
     return result;
 }
