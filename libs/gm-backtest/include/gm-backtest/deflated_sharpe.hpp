@@ -22,6 +22,8 @@
 
 #include <gm-core/error.hpp>
 
+#include <vector>
+
 namespace gm::backtest {
 
 /// The expected maximum Sharpe ratio across `n_trials` independent
@@ -56,5 +58,28 @@ namespace gm::backtest {
 /// visualization tool and is not traded."
 [[nodiscard]] Result<double> deflated_sharpe_ratio(double observed_sharpe, double sr0,
                                                      int t_observations, double skewness, double kurtosis);
+
+struct SampleMoments {
+    double mean;
+    double std_dev;   // population (1/n divisor) standard deviation - see the note below on why
+    double skewness;   // gamma3: (1/n * sum((x-mean)^3)) / std_dev^3
+    double kurtosis;    // gamma4: (1/n * sum((x-mean)^4)) / std_dev^4 - RAW, not excess (Normal = 3)
+};
+
+/// Plug-in (method-of-moments) sample skewness/kurtosis, matching the
+/// convention deflated_sharpe_ratio's gamma3/gamma4 parameters expect
+/// (raw kurtosis, Normal distribution = 3, not 0) - the standardizing
+/// std_dev used inside the skewness/kurtosis ratios is the POPULATION
+/// (1/n) standard deviation, the conventional choice for these plug-in
+/// moment estimators, which is deliberately NOT necessarily the same
+/// divisor a caller might use elsewhere for the Sharpe ratio's own
+/// (commonly sample, 1/(n-1)) standard deviation - std_dev is exposed
+/// here specifically so a caller doesn't have two different
+/// "standard deviation of the same series" values silently drift out of
+/// sync from computing them separately with different divisors.
+///
+/// Requires at least 2 observations with nonzero variance (a constant
+/// series has undefined skewness/kurtosis, division by a zero std_dev).
+[[nodiscard]] Result<SampleMoments> sample_moments(const std::vector<double>& returns);
 
 } // namespace gm::backtest

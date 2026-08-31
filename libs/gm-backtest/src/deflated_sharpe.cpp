@@ -70,4 +70,37 @@ Result<double> deflated_sharpe_ratio(double observed_sharpe, double sr0, int t_o
     }
 }
 
+Result<SampleMoments> sample_moments(const std::vector<double>& returns) {
+    if (returns.size() < 2) {
+        return tl::unexpected(
+            gm::Error::make(gm::ErrorCode::kInvalidArgument, "sample_moments requires at least 2 observations"));
+    }
+
+    double n = static_cast<double>(returns.size());
+    double sum = 0.0;
+    for (double r : returns) sum += r;
+    double mean = sum / n;
+
+    double sum_sq = 0.0, sum_cube = 0.0, sum_quad = 0.0;
+    for (double r : returns) {
+        double d = r - mean;
+        double d2 = d * d;
+        sum_sq += d2;
+        sum_cube += d2 * d;
+        sum_quad += d2 * d2;
+    }
+
+    double variance = sum_sq / n; // population variance (1/n), not sample (1/(n-1))
+    if (!(variance > 0.0)) {
+        return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure,
+                                               "sample_moments: return series has zero variance (constant)"));
+    }
+    double std_dev = std::sqrt(variance);
+
+    double skewness = (sum_cube / n) / (std_dev * std_dev * std_dev);
+    double kurtosis = (sum_quad / n) / (variance * variance);
+
+    return SampleMoments{mean, std_dev, skewness, kurtosis};
+}
+
 } // namespace gm::backtest
