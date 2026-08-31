@@ -5,6 +5,7 @@ find_package(boost_math CONFIG REQUIRED)
 # (same collision-avoidance pattern as gm-geometry-lib/gm-boundaries-lib).
 add_library(gm-backtest-lib STATIC
   src/deflated_sharpe.cpp
+  src/trade_simulation.cpp
 )
 add_library(gm::backtest ALIAS gm-backtest-lib)
 
