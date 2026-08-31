@@ -119,3 +119,36 @@ TEST_CASE("nonpositive dt is rejected", "[ou]") {
     auto fit = fit_ou(path, 0.0);
     REQUIRE_FALSE(fit.has_value());
 }
+
+TEST_CASE("a near-unit-root fit is rejected even though phi is nominally in (0,1)", "[ou]") {
+    // Regression test for a real degeneracy found on the 16-year
+    // pipeline: a 60-day window fit phi=0.9999963832 (half_life=191,648
+    // days) on real data, which is nominally inside (0,1) but makes
+    // mu=c/(1-phi) numerically explosive, producing an absurd z-score
+    // (observed: -222.8) for a spread that was not remotely that many
+    // standard deviations from anything. Reproduced here by simulating
+    // from a TRUE theta near zero (theta=1e-6, essentially a random
+    // walk over a short window) - the fitted phi should land close
+    // enough to 1 that the near-unit-root guard rejects it, the same
+    // way a short window's estimation noise can push a genuinely
+    // slower (but not this extreme) process's ESTIMATED phi into the
+    // same unreliable regime by chance.
+    Eigen::VectorXd path = simulate_ou_path(/*theta=*/1e-6, /*mu=*/2.0, /*sigma=*/0.5, /*dt=*/1.0,
+                                             /*n=*/60, /*seed=*/99);
+    auto fit = fit_ou(path, 1.0);
+    REQUIRE_FALSE(fit.has_value());
+}
+
+TEST_CASE("a plausible slow-but-real half-life is still accepted", "[ou]") {
+    // The guard must not be so aggressive it rejects genuinely slow
+    // (but not numerically degenerate) mean reversion - theta=0.004
+    // (half_life ~173 days) is close to the real "184-day, clearly not
+    // degenerate" case observed alongside the pathological one on the
+    // same ticker's history days apart.
+    Eigen::VectorXd path = simulate_ou_path(/*theta=*/0.004, /*mu=*/2.0, /*sigma=*/0.5, /*dt=*/1.0,
+                                             /*n=*/4000, /*seed=*/99);
+    auto fit = fit_ou(path, 1.0);
+    REQUIRE(fit.has_value());
+    CHECK(fit->half_life > 100.0); // genuinely slow, not rejected
+    CHECK(fit->half_life < 6931.0); // but still well under the near-unit-root cutoff
+}

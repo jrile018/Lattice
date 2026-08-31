@@ -4,6 +4,39 @@
 
 namespace gm::signals {
 
+namespace {
+// mu = c / (1 - phi): as phi -> 1 (near-unit-root), this division
+// becomes numerically explosive - found the hard way on the real
+// 16-year pipeline (ADR Sec3 principle 1: found via a real run, not a
+// unit test that happened to hit it). A concrete case: a 60-day window
+// fit phi=0.9999963832 (1-phi = 3.617e-6, half_life = 191,648 days).
+// sigma itself stays well-behaved there (2*theta/(1-phi^2) -> 1 in the
+// mathematical limit as phi->1, confirmed by direct computation: it
+// evaluated to 1.0000036, not collapsed toward zero) - the actual
+// culprit is mu: c is an ordinary-magnitude regression intercept with
+// no reason to be precisely proportional to (1-phi), so dividing it by
+// a near-zero denominator sends mu to an arbitrary, wildly wrong
+// magnitude, which then dominates (s-mu) and produces an absurd
+// z-score (observed: z=-222.8 for a spread that was not remotely 222
+// standard deviations from anything real). This is the textbook
+// near-unit-root mean-identification breakdown for AR(1)/OU
+// estimation, not a sign of "genuinely low noise" - a real risk this
+// project's own ADR-013 reversion study would otherwise silently
+// inherit as corrupted extreme-depth-bucket statistics.
+//
+// The threshold is chosen with a wide margin either side of the two
+// concrete cases observed on the real dataset: the pathological one
+// above (1-phi=3.6e-6) and an adjacent, plausible slow-but-real fit on
+// the same ticker just days earlier (1-phi=3.77e-3, half_life=184
+// days) - 1e-4 sits three orders of magnitude from the former and
+// ~38x below the latter, rejecting the former while comfortably
+// admitting the latter. Equivalently, this caps half_life at roughly
+// ln(2)/-ln(1-1e-4) =~ 6931 days (~19 years) - generous enough not to
+// reject genuinely slow mean reversion, tight enough to catch the
+// numerically unstable regime.
+constexpr double kMinOneMinusPhi = 1e-4;
+} // namespace
+
 Result<OuFit> fit_ou(const Eigen::VectorXd& s, double dt) {
     const Eigen::Index n = s.size();
     if (n < 3) {
@@ -45,6 +78,13 @@ Result<OuFit> fit_ou(const Eigen::VectorXd& s, double dt) {
             "AR(1) coefficient outside (0,1) - series is not a stationary mean-reverting process "
             "(phi<=0: oscillating/degenerate; phi>=1: non-stationary, no finite half-life)",
             "phi=" + std::to_string(phi)));
+    }
+    if (1.0 - phi < kMinOneMinusPhi) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kNumericFailure,
+            "AR(1) coefficient too close to 1 (near-unit-root) - mu=c/(1-phi) is numerically "
+            "unreliable in this regime even though phi is nominally inside (0,1)",
+            "phi=" + std::to_string(phi) + ", 1-phi=" + std::to_string(1.0 - phi)));
     }
 
     Eigen::VectorXd residuals = current.array() - (c + phi * lagged.array());
