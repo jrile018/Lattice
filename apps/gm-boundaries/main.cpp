@@ -89,6 +89,19 @@ struct ScoreRows {
     std::vector<double> depths, pvalues;
     std::vector<std::uint8_t> insides;
 
+    // A skipped estimator (degenerate MAD, too few points for k+1,
+    // near-singular covariance) is expected occasionally and by design
+    // does not halt the stage (ADR-007: the two estimators are
+    // independent). But "occasionally" and "systematically" look
+    // identical from scores.parquet alone - a bug that made every
+    // single Mahalanobis fit fail would silently just produce a
+    // KDE-only scores.parquet with no error anywhere. These counters
+    // make that distinction visible in the manifest instead of
+    // requiring an outside cross-check against the expected row count
+    // (view_a_frames_scored/view_b_points_scored * 2 estimators).
+    std::size_t mahalanobis_failures = 0;
+    std::size_t kde_failures = 0;
+
     void add(const std::string& date, const std::string& ticker, const char* view,
              const char* estimator, double depth, double pvalue, bool inside) {
         dates.push_back(date);
@@ -107,7 +120,13 @@ void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, con
     auto maha_fit = gm::boundaries::fit_mahalanobis(training);
     if (maha_fit) {
         auto score = gm::boundaries::score_mahalanobis(*maha_fit, query, alpha);
-        if (score) rows.add(date, ticker, view, "mahalanobis", score->depth, score->p_value, score->inside);
+        if (score) {
+            rows.add(date, ticker, view, "mahalanobis", score->depth, score->p_value, score->inside);
+        } else {
+            ++rows.mahalanobis_failures;
+        }
+    } else {
+        ++rows.mahalanobis_failures;
     }
 
     auto kde_fit = gm::boundaries::fit_kde(training, alpha);
@@ -117,9 +136,14 @@ void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, con
         // than a fabricated number, so a consumer can tell the two
         // estimators apart rather than mistaking a placeholder for a
         // real probability.
-        if (score)
+        if (score) {
             rows.add(date, ticker, view, "kde", score->depth, std::numeric_limits<double>::quiet_NaN(),
                       score->inside);
+        } else {
+            ++rows.kde_failures;
+        }
+    } else {
+        ++rows.kde_failures;
     }
 }
 
@@ -173,6 +197,13 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
         }
     }
 
+    // Read out before the vectors below are moved-from into the Table -
+    // these two counters are plain integers, unaffected by those moves,
+    // but capturing them into locals here keeps that fact from having
+    // to be re-verified by whoever edits this function next.
+    std::size_t mahalanobis_failures = rows.mahalanobis_failures;
+    std::size_t kde_failures = rows.kde_failures;
+
     gm::io::Table scores;
     if (auto r = scores.add_string_column("date", std::move(rows.dates)); !r) return tl::unexpected(r.error());
     if (auto r = scores.add_string_column("ticker", std::move(rows.tickers)); !r) return tl::unexpected(r.error());
@@ -191,6 +222,13 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     manifest.set_double("alpha", alpha);
     manifest.set_int("view_b_lookback_days", view_b_lookback);
     manifest.set_string("mesh_export", "disabled (boundaries.write_meshes not set - see file header)");
+    // Expected row count is (view_a_frames_scored + view_b_points_scored)
+    // * 2 estimators; these counters make the gap between that and
+    // rows_written attributable, instead of requiring the reader to
+    // reconstruct it by hand. Zero here (the common case) is itself
+    // useful confirmation, not just an absence of information.
+    manifest.set_int("mahalanobis_failures", static_cast<std::int64_t>(mahalanobis_failures));
+    manifest.set_int("kde_failures", static_cast<std::int64_t>(kde_failures));
 
     return {};
 }
