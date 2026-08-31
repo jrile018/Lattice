@@ -74,6 +74,33 @@ gm::Result<LogPriceMap> load_log_prices(const gm::io::Table& prices) {
 /// file header on why in_mst is the wrong column to filter on here).
 using KnnMap = std::map<std::string, std::map<std::string, std::vector<std::string>>>;
 
+/// The set of tickers gm-geometry actually carried through its
+/// liquidity-and-history filtering (ADR-001/ADR-016) - every ticker
+/// that appears in at least one in_knn edge. gm-ingest's prices.parquet
+/// covers a much larger candidate universe (every ticker considered
+/// before that filtering), so iterating log_prices' own keys directly
+/// would walk hundreds of tickers gm-geometry never admitted, each one
+/// contributing nothing but skip-counted no-op iterations across their
+/// entire multi-year history - wasted computation, and a
+/// rows_skipped_incomplete figure dominated by "this ticker was never
+/// in scope" rather than genuine data gaps within the real universe.
+gm::Result<std::set<std::string>> load_active_universe(const gm::io::Table& edges) {
+    auto ticker_a_col = edges.string_column("ticker_a");
+    if (!ticker_a_col) return tl::unexpected(ticker_a_col.error());
+    auto ticker_b_col = edges.string_column("ticker_b");
+    if (!ticker_b_col) return tl::unexpected(ticker_b_col.error());
+    auto in_knn_col = edges.bool_column("in_knn");
+    if (!in_knn_col) return tl::unexpected(in_knn_col.error());
+
+    std::set<std::string> result;
+    for (std::size_t i = 0; i < ticker_a_col->size(); ++i) {
+        if (!(*in_knn_col)[i]) continue;
+        result.insert((*ticker_a_col)[i]);
+        result.insert((*ticker_b_col)[i]);
+    }
+    return result;
+}
+
 gm::Result<KnnMap> load_knn_neighbors(const gm::io::Table& edges) {
     auto date_col = edges.string_column("date");
     if (!date_col) return tl::unexpected(date_col.error());
@@ -218,6 +245,8 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     if (!log_prices) return tl::unexpected(log_prices.error());
     auto knn = load_knn_neighbors(*edges);
     if (!knn) return tl::unexpected(knn.error());
+    auto active_universe = load_active_universe(*edges);
+    if (!active_universe) return tl::unexpected(active_universe.error());
 
     std::int64_t window = config.get_int_or("signals.spread_fit_window_days", 60);
     double ridge_lambda = config.get_double_or("signals.ridge_lambda", 1e-6);
@@ -241,7 +270,19 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
 
     std::int64_t rows_skipped_incomplete = 0;
 
-    for (const auto& [ticker, date_price_map] : *log_prices) {
+    for (const auto& ticker : *active_universe) {
+        auto price_it = log_prices->find(ticker);
+        if (price_it == log_prices->end()) {
+            // A ticker gm-geometry admitted but gm-ingest's price map has
+            // no entry for at all would be a real cross-stage inconsistency
+            // (not an expected data gap) - counted rather than silently
+            // dropped, but this should not happen in practice since
+            // gm-geometry's universe is itself derived from prices.parquet.
+            ++rows_skipped_incomplete;
+            continue;
+        }
+        const auto& date_price_map = price_it->second;
+
         std::vector<std::string> dates;
         dates.reserve(date_price_map.size());
         for (const auto& [d, _] : date_price_map) dates.push_back(d); // std::map keys are already sorted
@@ -336,6 +377,7 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     auto write2 = gm::io::write_parquet(excursions_table, output_dir / "excursions.parquet");
     if (!write2) return tl::unexpected(write2.error());
 
+    manifest.set_int("active_universe_size", static_cast<std::int64_t>(active_universe->size()));
     manifest.set_int("rows_written", static_cast<std::int64_t>(spreads_table.num_rows()));
     manifest.set_int("rows_skipped_incomplete", rows_skipped_incomplete);
     manifest.set_int("excursions_written", static_cast<std::int64_t>(excursions_table.num_rows()));
