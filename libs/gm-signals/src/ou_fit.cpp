@@ -4,39 +4,6 @@
 
 namespace gm::signals {
 
-namespace {
-// mu = c / (1 - phi): as phi -> 1 (near-unit-root), this division
-// becomes numerically explosive - found the hard way on the real
-// 16-year pipeline (ADR Sec3 principle 1: found via a real run, not a
-// unit test that happened to hit it). A concrete case: a 60-day window
-// fit phi=0.9999963832 (1-phi = 3.617e-6, half_life = 191,648 days).
-// sigma itself stays well-behaved there (2*theta/(1-phi^2) -> 1 in the
-// mathematical limit as phi->1, confirmed by direct computation: it
-// evaluated to 1.0000036, not collapsed toward zero) - the actual
-// culprit is mu: c is an ordinary-magnitude regression intercept with
-// no reason to be precisely proportional to (1-phi), so dividing it by
-// a near-zero denominator sends mu to an arbitrary, wildly wrong
-// magnitude, which then dominates (s-mu) and produces an absurd
-// z-score (observed: z=-222.8 for a spread that was not remotely 222
-// standard deviations from anything real). This is the textbook
-// near-unit-root mean-identification breakdown for AR(1)/OU
-// estimation, not a sign of "genuinely low noise" - a real risk this
-// project's own ADR-013 reversion study would otherwise silently
-// inherit as corrupted extreme-depth-bucket statistics.
-//
-// The threshold is chosen with a wide margin either side of the two
-// concrete cases observed on the real dataset: the pathological one
-// above (1-phi=3.6e-6) and an adjacent, plausible slow-but-real fit on
-// the same ticker just days earlier (1-phi=3.77e-3, half_life=184
-// days) - 1e-4 sits three orders of magnitude from the former and
-// ~38x below the latter, rejecting the former while comfortably
-// admitting the latter. Equivalently, this caps half_life at roughly
-// ln(2)/-ln(1-1e-4) =~ 6931 days (~19 years) - generous enough not to
-// reject genuinely slow mean reversion, tight enough to catch the
-// numerically unstable regime.
-constexpr double kMinOneMinusPhi = 1e-4;
-} // namespace
-
 Result<OuFit> fit_ou(const Eigen::VectorXd& s, double dt) {
     const Eigen::Index n = s.size();
     if (n < 3) {
@@ -79,18 +46,50 @@ Result<OuFit> fit_ou(const Eigen::VectorXd& s, double dt) {
             "(phi<=0: oscillating/degenerate; phi>=1: non-stationary, no finite half-life)",
             "phi=" + std::to_string(phi)));
     }
-    if (1.0 - phi < kMinOneMinusPhi) {
+
+    double theta = -std::log(phi) / dt;
+    double half_life = std::log(2.0) / theta;
+
+    // A half-life longer than the sample the fit was estimated from is
+    // not a claim this function can stand behind - found the hard way
+    // on the real 16-year pipeline (ADR Sec3 principle 1: found via a
+    // real run, not a unit test that happened to hit it). A concrete
+    // case: a 60-point window fit phi=0.9999963832 -> half_life=191,648
+    // days, and downstream mu=c/(1-phi) exploded (an ordinary-magnitude
+    // intercept c divided by a near-zero (1-phi) sends mu to an
+    // arbitrary wrong magnitude), producing an absurd z-score
+    // (observed: -222.8, for a spread nowhere near that many standard
+    // deviations from anything real) - the textbook near-unit-root
+    // mean-identification breakdown for AR(1)/OU estimation.
+    //
+    // An earlier version of this guard used a fixed cutoff on (1-phi)
+    // instead of this sample-relative one; it caught that single most
+    // extreme case but left a real, less extreme version of the SAME
+    // failure mode: on the same real run, a different ticker's
+    // half_life oscillated 109 -> 4880 -> 385 -> 499 -> 2260 -> 226 ->
+    // ... days across three consecutive weekly refits before settling
+    // near a plausible ~20 days, with peak z-scores of 30-50 along the
+    // way - well past the fixed cutoff (which only bit past ~6931
+    // days) but still statistically meaningless: a 60-point sample
+    // cannot distinguish a genuinely-but-slowly-reverting process from
+    // a random walk once the claimed half-life exceeds the window
+    // itself, so estimates in that entire range are unreliable, not
+    // just the most extreme single day. Bounding by n_pairs (not a
+    // fixed constant) makes the guard scale automatically with
+    // whatever window size a caller configures, rather than requiring
+    // a second manually-tuned constant.
+    if (half_life > static_cast<double>(n_pairs)) {
         return tl::unexpected(gm::Error::make(
             gm::ErrorCode::kNumericFailure,
-            "AR(1) coefficient too close to 1 (near-unit-root) - mu=c/(1-phi) is numerically "
-            "unreliable in this regime even though phi is nominally inside (0,1)",
-            "phi=" + std::to_string(phi) + ", 1-phi=" + std::to_string(1.0 - phi)));
+            "half-life exceeds the sample size used to estimate it - the fit cannot statistically "
+            "distinguish this from a non-mean-reverting process, and mu=c/(1-phi) is unreliable in "
+            "this regime",
+            "half_life=" + std::to_string(half_life) + ", n_pairs=" + std::to_string(n_pairs)));
     }
 
     Eigen::VectorXd residuals = current.array() - (c + phi * lagged.array());
     double sigma_eps_sq = residuals.squaredNorm() / static_cast<double>(n_pairs); // MLE: divide by n_pairs
 
-    double theta = -std::log(phi) / dt;
     double mu = c / (1.0 - phi);
     // sigma^2 = sigma_eps^2 * 2*theta / (1 - phi^2), from matching the
     // OU process's exact discretization variance
@@ -98,7 +97,6 @@ Result<OuFit> fit_ou(const Eigen::VectorXd& s, double dt) {
     // (since phi = exp(-theta*dt) by construction, phi^2 = exp(-2*theta*dt)).
     double sigma_sq = sigma_eps_sq * 2.0 * theta / (1.0 - phi * phi);
     double sigma = std::sqrt(std::max(sigma_sq, 0.0));
-    double half_life = std::log(2.0) / theta;
 
     return OuFit{theta, mu, sigma, half_life};
 }

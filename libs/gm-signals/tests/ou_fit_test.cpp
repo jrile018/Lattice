@@ -120,49 +120,70 @@ TEST_CASE("nonpositive dt is rejected", "[ou]") {
     REQUIRE_FALSE(fit.has_value());
 }
 
+// Helper for the deterministic boundary tests below: a noise-free
+// EXACT geometric decay s_t = mu + A*phi_true^t. With zero residual
+// noise, OLS recovers phi_true exactly (Cov(s_t,s_{t-1})/Var(s_{t-1})
+// reduces algebraically to phi_true when current_centered = phi_true *
+// lagged_centered exactly) - a deterministic, zero-variance way to
+// target a specific half-life, unlike a random simulation (tried
+// first for the near-unit-root case below, and correctly caught as
+// flaky by CI: with a true theta this tiny, a short simulated path
+// behaves like a random walk, whose OLS-fitted phi has too much
+// sampling variance to reliably land on a chosen side of any
+// threshold - an estimation-noise phenomenon, not a deterministic
+// function of true theta alone).
+Eigen::VectorXd geometric_decay_path(double phi_true, int n, double mu = 2.0, double amplitude = 1.0) {
+    Eigen::VectorXd path(n);
+    for (int t = 0; t < n; ++t) path(t) = mu + amplitude * std::pow(phi_true, t);
+    return path;
+}
+
 TEST_CASE("a near-unit-root fit is rejected even though phi is nominally in (0,1)", "[ou]") {
     // Regression test for a real degeneracy found on the 16-year
-    // pipeline: a 60-day window fit phi=0.9999963832 (half_life=191,648
-    // days) on real data, which is nominally inside (0,1) but makes
-    // mu=c/(1-phi) numerically explosive, producing an absurd z-score
-    // (observed: -222.8) for a spread that was not remotely that many
-    // standard deviations from anything.
-    //
-    // A RANDOM near-unit-root simulation is unsuitable here (tried
-    // first, and correctly caught as flaky by CI): with theta this
-    // tiny, 60 simulated points behave like a short random walk, whose
-    // OLS-fitted phi has enough sampling variance to NOT reliably land
-    // within kMinOneMinusPhi of 1 - it's an estimation-noise phenomenon,
-    // not a deterministic function of the true theta alone. Instead,
-    // this constructs a noise-free EXACT geometric decay s_t = mu +
-    // A*phi_true^t: with zero residual noise, OLS recovers phi_true
-    // exactly (Cov(s_t,s_{t-1})/Var(s_{t-1}) reduces algebraically to
-    // phi_true when current_centered = phi_true * lagged_centered
-    // exactly), giving a deterministic, zero-variance test of the
-    // rejection boundary itself - not a claim that real data looks
-    // like this.
-    const double true_mu = 2.0;
-    const double phi_true = 1.0 - 2e-5; // comfortably below the 1e-4 rejection floor
-    Eigen::VectorXd path(60);
-    double amplitude = 1.0;
-    for (int t = 0; t < 60; ++t) {
-        path(t) = true_mu + amplitude * std::pow(phi_true, t);
-    }
-
+    // pipeline: a 60-point window fit phi=0.9999963832 (half_life=
+    // 191,648 days) on real data, which is nominally inside (0,1) but
+    // makes mu=c/(1-phi) numerically explosive, producing an absurd
+    // z-score (observed: -222.8) for a spread that was not remotely
+    // that many standard deviations from anything. half_life here is
+    // enormously larger than n_pairs=59, so the sample-size-relative
+    // guard rejects it by a huge margin.
+    auto path = geometric_decay_path(1.0 - 2e-5, 60);
     auto fit = fit_ou(path, 1.0);
     REQUIRE_FALSE(fit.has_value());
 }
 
-TEST_CASE("a plausible slow-but-real half-life is still accepted", "[ou]") {
-    // The guard must not be so aggressive it rejects genuinely slow
-    // (but not numerically degenerate) mean reversion - theta=0.004
-    // (half_life ~173 days) is close to the real "184-day, clearly not
-    // degenerate" case observed alongside the pathological one on the
-    // same ticker's history days apart.
+TEST_CASE("half_life just above the sample size is rejected", "[ou]") {
+    // n=60 -> n_pairs=59. Target half_life=100 (> 59): should reject.
+    double theta = std::log(2.0) / 100.0;
+    auto path = geometric_decay_path(std::exp(-theta), 60);
+    auto fit = fit_ou(path, 1.0);
+    REQUIRE_FALSE(fit.has_value());
+}
+
+TEST_CASE("half_life comfortably below the sample size is accepted", "[ou]") {
+    // Same n=60 -> n_pairs=59. Target half_life=40 (< 59): should be
+    // accepted, and the fitted half_life should land close to the
+    // target (exact up to floating-point, since this is a noise-free
+    // construction).
+    double theta = std::log(2.0) / 40.0;
+    auto path = geometric_decay_path(std::exp(-theta), 60);
+    auto fit = fit_ou(path, 1.0);
+    REQUIRE(fit.has_value());
+    CHECK(fit->half_life == Catch::Approx(40.0).epsilon(0.01));
+}
+
+TEST_CASE("a plausible slow-but-real half-life is still accepted on a long window", "[ou]") {
+    // The guard scales with sample size, not a fixed cutoff: a
+    // half_life of ~173 days (close to a real, clearly non-degenerate
+    // ~184-day fit observed on the same real dataset) would exceed
+    // n_pairs on a 60-point window, but is comfortably accepted here
+    // against a long (4000-point) window, exactly as the guard's
+    // rationale intends - the same "184-day fit" that would be
+    // unreliable from 60 points is perfectly estimable from 4000.
     Eigen::VectorXd path = simulate_ou_path(/*theta=*/0.004, /*mu=*/2.0, /*sigma=*/0.5, /*dt=*/1.0,
                                              /*n=*/4000, /*seed=*/99);
     auto fit = fit_ou(path, 1.0);
     REQUIRE(fit.has_value());
-    CHECK(fit->half_life > 100.0); // genuinely slow, not rejected
-    CHECK(fit->half_life < 6931.0); // but still well under the near-unit-root cutoff
+    CHECK(fit->half_life > 100.0);
+    CHECK(fit->half_life < 3999.0); // n_pairs for this window
 }
