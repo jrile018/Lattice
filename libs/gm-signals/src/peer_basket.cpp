@@ -2,6 +2,7 @@
 
 #include <osqp/osqp.h>
 
+#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -111,7 +112,10 @@ Result<Eigen::VectorXd> fit_peer_basket_weights(const Eigen::VectorXd& target_re
     }
 
     OSQPSettings* settings = OSQPSettings_new();
-    settings->verbose = 0;
+    settings->verbose = 1; // TEMP DEBUG
+    std::fprintf(stderr, "TEMP DEBUG defaults: max_iter=%d eps_abs=%g eps_rel=%g rho=%g sigma=%g alpha=%g scaling=%d\n",
+                 (int)settings->max_iter, settings->eps_abs, settings->eps_rel, settings->rho,
+                 settings->sigma, settings->alpha, (int)settings->scaling);
 
     OSQPSolver* solver = nullptr;
     OSQPInt setup_flag = osqp_setup(&solver, p_mat, q_vec.data(), a_mat, l_vec.data(), u_vec.data(), kk + 1, kk,
