@@ -5,6 +5,7 @@ add_executable(gm-geometry-tests
   distance_test.cpp
   mds_test.cpp
   procrustes_test.cpp
+  graph_test.cpp
 )
 
 target_link_libraries(gm-geometry-tests

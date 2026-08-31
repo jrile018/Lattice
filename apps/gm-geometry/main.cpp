@@ -15,6 +15,7 @@
 #include <gm-core/stage_main.hpp>
 #include <gm-geometry/correlation.hpp>
 #include <gm-geometry/distance.hpp>
+#include <gm-geometry/graph.hpp>
 #include <gm-geometry/mds.hpp>
 #include <gm-geometry/procrustes.hpp>
 #include <gm-geometry/rmt.hpp>
@@ -178,6 +179,11 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
                                 gm::Manifest& manifest) {
     std::int64_t window_days = config.get_int_or("geometry.window_days", 60);
     std::int64_t k = config.get_int_or("geometry.embedding_dims", 3);
+    // ADR §6.4's View C default: k nearest neighbours under D(t) for
+    // peer-basket selection. Separate config key from embedding_dims -
+    // unrelated meanings that happen to share the letter k in the ADR's
+    // prose (embedding dimensionality vs. neighbour-graph degree).
+    std::int64_t knn_k = config.get_int_or("geometry.knn_k", 8);
     if (window_days < 2) {
         return tl::unexpected(
             gm::Error::make(gm::ErrorCode::kInvalidArgument, "geometry.window_days must be >= 2"));
@@ -262,6 +268,9 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     std::vector<double> out_x, out_y, out_z;
     std::vector<std::string> regime_dates;
     std::vector<double> regime_structural_change;
+    std::vector<std::string> edge_dates, edge_ticker_a, edge_ticker_b;
+    std::vector<double> edge_distances;
+    std::vector<std::uint8_t> edge_in_mst;
 
     std::optional<Eigen::MatrixXd> previous_aligned;
 
@@ -284,6 +293,20 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
 
         auto dist = gm::geometry::mantegna_distance(denoised->denoised_correlation);
         if (!dist) return tl::unexpected(dist.error());
+
+        // k-NN + MST edges are computed on D(t) itself, not the 3D
+        // embedding below (ADR §6.4) - View C's peer-basket selection
+        // needs the full-precision distance the embedding necessarily
+        // compresses when k (embedding_dims) < n-1.
+        auto edges = gm::geometry::knn_and_mst_edges(*dist, static_cast<int>(knn_k));
+        if (!edges) return tl::unexpected(edges.error());
+        for (const auto& e : *edges) {
+            edge_dates.push_back(frame_date);
+            edge_ticker_a.push_back(active_tickers[static_cast<std::size_t>(e.i)]);
+            edge_ticker_b.push_back(active_tickers[static_cast<std::size_t>(e.j)]);
+            edge_distances.push_back(e.distance);
+            edge_in_mst.push_back(e.in_mst ? 1 : 0);
+        }
 
         auto embedding = gm::geometry::classical_mds(*dist, static_cast<int>(k));
         if (!embedding) return tl::unexpected(embedding.error());
@@ -329,11 +352,26 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     auto write2 = gm::io::write_parquet(regime_table, output_dir / "regime.parquet");
     if (!write2) return tl::unexpected(write2.error());
 
+    gm::io::Table edges_table;
+    if (auto r = edges_table.add_string_column("date", std::move(edge_dates)); !r) return tl::unexpected(r.error());
+    if (auto r = edges_table.add_string_column("ticker_a", std::move(edge_ticker_a)); !r)
+        return tl::unexpected(r.error());
+    if (auto r = edges_table.add_string_column("ticker_b", std::move(edge_ticker_b)); !r)
+        return tl::unexpected(r.error());
+    if (auto r = edges_table.add_double_column("distance", std::move(edge_distances)); !r)
+        return tl::unexpected(r.error());
+    if (auto r = edges_table.add_bool_column("in_mst", std::move(edge_in_mst)); !r) return tl::unexpected(r.error());
+
+    auto write3 = gm::io::write_parquet(edges_table, output_dir / "edges.parquet");
+    if (!write3) return tl::unexpected(write3.error());
+
     manifest.set_int("num_frames", static_cast<std::int64_t>(regime_table.num_rows()));
     manifest.set_int("num_tickers", static_cast<std::int64_t>(active_tickers.size()));
     manifest.set_int("rows_written", static_cast<std::int64_t>(geometry_table.num_rows()));
+    manifest.set_int("edge_rows_written", static_cast<std::int64_t>(edges_table.num_rows()));
     manifest.set_int("window_days", window_days);
     manifest.set_int("embedding_dims", k);
+    manifest.set_int("knn_k", knn_k);
     manifest.set_double("q_n_over_window", q);
 
     return {};

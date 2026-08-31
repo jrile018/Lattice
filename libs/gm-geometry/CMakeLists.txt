@@ -13,6 +13,7 @@ add_library(gm-geometry-lib STATIC
   src/distance.cpp
   src/mds.cpp
   src/procrustes.cpp
+  src/graph.cpp
 )
 add_library(gm::geometry ALIAS gm-geometry-lib)
 
