@@ -4,6 +4,7 @@ find_package(osqp CONFIG REQUIRED)
 add_library(gm-signals-lib STATIC
   src/peer_basket.cpp
   src/ou_fit.cpp
+  src/excursion.cpp
 )
 add_library(gm::signals ALIAS gm-signals-lib)
 
