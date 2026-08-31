@@ -4,10 +4,8 @@
 
 namespace gm::backtest {
 
-Result<PortfolioResult> simulate_portfolio(
-    const std::vector<TradeCandidate>& candidates,
-    const std::map<std::string, std::map<std::string, double>>& spread_by_ticker_date,
-    double cost_bps_per_leg) {
+Result<PortfolioResult> simulate_portfolio(const std::vector<TradeCandidate>& candidates,
+                                            double cost_bps_per_leg) {
     if (cost_bps_per_leg < 0.0) {
         return tl::unexpected(gm::Error::make(gm::ErrorCode::kInvalidArgument, "cost_bps_per_leg must be >= 0"));
     }
@@ -29,12 +27,8 @@ Result<PortfolioResult> simulate_portfolio(
                 gm::Error::make(gm::ErrorCode::kInvalidArgument, "trade candidate num_legs must be >= 1", c.ticker));
         }
 
-        auto ticker_it = spread_by_ticker_date.find(c.ticker);
-        if (ticker_it == spread_by_ticker_date.end()) continue; // no data for this ticker - skip, not an error
-
-        const auto& dates_map = ticker_it->second;
-        auto lo = dates_map.lower_bound(c.entry_date);
-        auto hi = dates_map.upper_bound(c.exit_date); // one-past the last date <= exit_date
+        auto lo = c.spread_series.lower_bound(c.entry_date);
+        auto hi = c.spread_series.upper_bound(c.exit_date); // one-past the last date <= exit_date
 
         std::vector<std::pair<std::string, double>> in_range(lo, hi);
         if (in_range.size() < 2) continue; // nothing to compute a return between - a data-boundary case, not an error

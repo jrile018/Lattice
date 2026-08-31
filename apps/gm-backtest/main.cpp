@@ -30,12 +30,29 @@
 //      always satisfied (no live liquidity/borrow feed exists yet;
 //      the universe is already liquidity-screened at ADR-001's stage).
 //
-// Eligible excursions become TradeCandidates and are handed to
-// gm::backtest::simulate_portfolio for a daily equal-weighted return
-// series, then scored with gm::backtest::sample_moments and
-// gm::backtest::deflated_sharpe_ratio (N=1 for this single default-
-// parameter run - the real multi-trial DSR is gm-sweep's job, once it
-// exists, using the trial count and Sharpe variance it tracks).
+// For each candidate that survives ALL five conditions, its P&L series
+// is NOT taken from gm-signals' spreads.parquet spread column directly
+// - that column is refit fresh every single day (a new causal window,
+// and potentially a different peer-basket NEIGHBOUR SET entirely, since
+// gm-geometry's k-NN graph itself changes day to day), so differencing
+// it across days does not represent one held position's mark-to-market
+// P&L; it can silently mix real price movement with the reference
+// basket changing out from under the position. Found the hard way on
+// the real 16-year run: several unrelated tickers' spreads jumped
+// simultaneously on one date, traced to a wholesale k-NN neighbour-set
+// swap that day, not any real market move (see git history). Instead,
+// build_fixed_basket_series() reconstructs a FIXED-basket spread series
+// per candidate using the entry-day weights (gm-signals' baskets.parquet)
+// held constant across the whole holding period, applied to raw prices
+// (gm-ingest's prices.parquet) - exactly what a real held position's
+// P&L requires.
+//
+// Eligible candidates are handed to gm::backtest::simulate_portfolio
+// for a daily equal-weighted return series, then scored with
+// gm::backtest::sample_moments and gm::backtest::deflated_sharpe_ratio
+// (N=1 for this single default-parameter run - the real multi-trial
+// DSR is gm-sweep's job, once it exists, using the trial count and
+// Sharpe variance it tracks).
 
 #include <gm-backtest/deflated_sharpe.hpp>
 #include <gm-backtest/trade_simulation.hpp>
@@ -55,6 +72,102 @@
 #include <vector>
 
 namespace {
+
+/// ticker -> date -> ln(adjclose), the same convention gm-signals'
+/// own load_log_prices uses - needed here to reconstruct a FIXED-basket
+/// spread series per candidate (see the header comment above and the
+/// git history on why gm-signals' own spreads.parquet spread column
+/// cannot be differenced across days to get a held position's P&L).
+using LogPriceMap = std::map<std::string, std::map<std::string, double>>;
+
+gm::Result<LogPriceMap> load_log_prices(const gm::io::Table& prices) {
+    auto ticker_col = prices.string_column("ticker");
+    if (!ticker_col) return tl::unexpected(ticker_col.error());
+    auto date_col = prices.string_column("date");
+    if (!date_col) return tl::unexpected(date_col.error());
+    auto adjclose_col = prices.double_column("adjclose");
+    if (!adjclose_col) return tl::unexpected(adjclose_col.error());
+
+    LogPriceMap result;
+    for (std::size_t i = 0; i < ticker_col->size(); ++i) {
+        double p = (*adjclose_col)[i];
+        if (!(p > 0.0)) continue;
+        result[(*ticker_col)[i]][(*date_col)[i]] = std::log(p);
+    }
+    return result;
+}
+
+struct BasketLeg {
+    std::string neighbor_ticker;
+    double weight;
+};
+
+/// ticker -> entry_date -> that day's fitted peer-basket legs
+/// (gm-signals' baskets.parquet). Keyed by entry_date, not just
+/// ticker, because the SAME ticker can have different baskets locked
+/// in at different entry dates over a long history.
+using BasketsByTickerDate = std::map<std::string, std::map<std::string, std::vector<BasketLeg>>>;
+
+gm::Result<BasketsByTickerDate> load_baskets(const gm::io::Table& t) {
+    auto date_col = t.string_column("date");
+    if (!date_col) return tl::unexpected(date_col.error());
+    auto ticker_col = t.string_column("ticker");
+    if (!ticker_col) return tl::unexpected(ticker_col.error());
+    auto neighbor_col = t.string_column("neighbor_ticker");
+    if (!neighbor_col) return tl::unexpected(neighbor_col.error());
+    auto weight_col = t.double_column("weight");
+    if (!weight_col) return tl::unexpected(weight_col.error());
+
+    BasketsByTickerDate result;
+    for (std::size_t i = 0; i < date_col->size(); ++i) {
+        result[(*ticker_col)[i]][(*date_col)[i]].push_back(BasketLeg{(*neighbor_col)[i], (*weight_col)[i]});
+    }
+    return result;
+}
+
+/// Builds the FIXED-basket spread series for one candidate, held over
+/// its own [entry_date, exit_date]: spread(date) = ln P_target(date) -
+/// sum(w_j * ln P_j(date)), using `legs` (the basket locked in AT
+/// ENTRY) applied to every subsequent date's RAW prices - the entry-day
+/// weights never change over the holding period, unlike gm-signals' own
+/// daily-refit spread column. Walks the target's OWN price date
+/// sequence (not calendar arithmetic); a date is included only if the
+/// target AND every neighbour leg has a price for it (a partial gap on
+/// one neighbour drops just that date, not the whole candidate).
+std::map<std::string, double> build_fixed_basket_series(const std::string& target_ticker,
+                                                          const std::string& entry_date,
+                                                          const std::string& exit_date,
+                                                          const std::vector<BasketLeg>& legs,
+                                                          const LogPriceMap& log_prices) {
+    std::map<std::string, double> result;
+    auto target_it = log_prices.find(target_ticker);
+    if (target_it == log_prices.end()) return result;
+
+    std::vector<const std::map<std::string, double>*> neighbor_maps;
+    for (const auto& leg : legs) {
+        auto it = log_prices.find(leg.neighbor_ticker);
+        if (it == log_prices.end()) return result; // a leg with no price data at all - can't build any of this series
+        neighbor_maps.push_back(&it->second);
+    }
+
+    auto lo = target_it->second.lower_bound(entry_date);
+    auto hi = target_it->second.upper_bound(exit_date);
+    for (auto it = lo; it != hi; ++it) {
+        const std::string& date = it->first;
+        double s = it->second;
+        bool complete = true;
+        for (std::size_t j = 0; j < legs.size(); ++j) {
+            auto np = neighbor_maps[j]->find(date);
+            if (np == neighbor_maps[j]->end()) {
+                complete = false;
+                break;
+            }
+            s -= legs[j].weight * np->second;
+        }
+        if (complete) result[date] = s;
+    }
+    return result;
+}
 
 struct SpreadPoint {
     double z;
@@ -171,26 +284,35 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     std::filesystem::path boundaries_dir = output_dir.parent_path() / "gm-boundaries";
     std::filesystem::path geometry_dir = output_dir.parent_path() / "gm-geometry";
     std::filesystem::path universe_dir = output_dir.parent_path() / "gm-universe";
+    std::filesystem::path ingest_dir = output_dir.parent_path() / "gm-ingest";
 
     auto excursions_table = gm::io::read_parquet(signals_dir / "excursions.parquet");
     if (!excursions_table) return tl::unexpected(excursions_table.error());
     auto spreads_table = gm::io::read_parquet(signals_dir / "spreads.parquet");
     if (!spreads_table) return tl::unexpected(spreads_table.error());
+    auto baskets_table = gm::io::read_parquet(signals_dir / "baskets.parquet");
+    if (!baskets_table) return tl::unexpected(baskets_table.error());
     auto scores_table = gm::io::read_parquet(boundaries_dir / "scores.parquet");
     if (!scores_table) return tl::unexpected(scores_table.error());
     auto regime_table = gm::io::read_parquet(geometry_dir / "regime.parquet");
     if (!regime_table) return tl::unexpected(regime_table.error());
     auto universe_table = gm::io::read_parquet(universe_dir / "universe.parquet");
     if (!universe_table) return tl::unexpected(universe_table.error());
+    auto prices_table = gm::io::read_parquet(ingest_dir / "prices.parquet");
+    if (!prices_table) return tl::unexpected(prices_table.error());
 
     auto excursions = load_excursions(*excursions_table);
     if (!excursions) return tl::unexpected(excursions.error());
     auto spreads = load_spreads(*spreads_table);
     if (!spreads) return tl::unexpected(spreads.error());
+    auto baskets = load_baskets(*baskets_table);
+    if (!baskets) return tl::unexpected(baskets.error());
     auto view_b = load_view_b(*scores_table);
     if (!view_b) return tl::unexpected(view_b.error());
     auto regime = load_regime(*regime_table);
     if (!regime) return tl::unexpected(regime.error());
+    auto log_prices = load_log_prices(*prices_table);
+    if (!log_prices) return tl::unexpected(log_prices.error());
 
     auto uni_ticker = universe_table->string_column("ticker");
     if (!uni_ticker) return tl::unexpected(uni_ticker.error());
@@ -237,13 +359,10 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     std::int64_t rejected_view_b = 0;
     std::int64_t rejected_view_a_veto = 0;
     std::int64_t rejected_earnings = 0;
+    std::int64_t rejected_no_basket_weights = 0;
+    std::int64_t rejected_empty_fixed_series = 0;
 
     std::vector<gm::backtest::TradeCandidate> candidates;
-    // ticker -> date -> spread level, the narrower lookup simulate_portfolio needs.
-    std::map<std::string, std::map<std::string, double>> spread_levels;
-    for (const auto& [ticker, dates] : *spreads) {
-        for (const auto& [date, pt] : dates) spread_levels[ticker][date] = pt.spread;
-    }
 
     for (const auto& exc : *excursions) {
         auto ticker_spreads_it = spreads->find(exc.ticker);
@@ -296,12 +415,36 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
             continue;
         }
 
-        candidates.push_back(gm::backtest::TradeCandidate{
-            exc.ticker, exc.start_date, exit_date, /*long_the_spread=*/entry_point.z < 0.0,
-            /*num_legs=*/1 + entry_point.n_neighbors});
+        auto basket_ticker_it = baskets->find(exc.ticker);
+        if (basket_ticker_it == baskets->end()) {
+            ++rejected_no_basket_weights;
+            continue;
+        }
+        auto basket_date_it = basket_ticker_it->second.find(exc.start_date);
+        if (basket_date_it == basket_ticker_it->second.end() || basket_date_it->second.empty()) {
+            ++rejected_no_basket_weights;
+            continue;
+        }
+
+        // The FIXED-basket spread series for this candidate, held over
+        // its own [start_date, exit_date] using the entry-day weights -
+        // see the file header and build_fixed_basket_series' own
+        // comment for why this replaces spreads.parquet's own
+        // daily-refit spread column for P&L purposes.
+        auto fixed_series =
+            build_fixed_basket_series(exc.ticker, exc.start_date, exit_date, basket_date_it->second, *log_prices);
+        if (fixed_series.size() < 2) {
+            ++rejected_empty_fixed_series;
+            continue;
+        }
+
+        candidates.push_back(gm::backtest::TradeCandidate{exc.ticker, exc.start_date, exit_date,
+                                                            /*long_the_spread=*/entry_point.z < 0.0,
+                                                            /*num_legs=*/1 + entry_point.n_neighbors,
+                                                            std::move(fixed_series)});
     }
 
-    auto portfolio = gm::backtest::simulate_portfolio(candidates, spread_levels, cost_bps_per_leg);
+    auto portfolio = gm::backtest::simulate_portfolio(candidates, cost_bps_per_leg);
     if (!portfolio) return tl::unexpected(portfolio.error());
 
     gm::io::Table daily_table;
@@ -322,6 +465,8 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     results["rejected_view_b"] = rejected_view_b;
     results["rejected_view_a_veto"] = rejected_view_a_veto;
     results["rejected_earnings_in_horizon"] = rejected_earnings;
+    results["rejected_no_basket_weights"] = rejected_no_basket_weights;
+    results["rejected_empty_fixed_series"] = rejected_empty_fixed_series;
     results["structural_change_veto_threshold"] = veto_threshold;
     results["trading_days_with_positions"] = portfolio->dates.size();
 
