@@ -1,6 +1,7 @@
 # Build outputs
 build/
 build-*/
+build_*/
 out/
 
 # vcpkg tool + downloaded/built packages (bootstrapped locally, not committed)

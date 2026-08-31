@@ -94,6 +94,7 @@ add_subdirectory(libs/gm-data)
 add_subdirectory(libs/gm-geometry)
 add_subdirectory(libs/gm-boundaries)
 add_subdirectory(libs/gm-signals)
+add_subdirectory(libs/gm-backtest)
 
 add_subdirectory(apps/gm-universe)
 add_subdirectory(apps/gm-ingest)
