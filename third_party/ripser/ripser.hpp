@@ -511,7 +511,18 @@ public:
 	};
 
 	diameter_entry_t get_zero_pivot_facet(const diameter_entry_t simplex, const index_t dim) {
-		static simplex_boundary_enumerator facets(0, *this);
+// NOTE (gm-topology library adaptation): the reference implementation
+		// declared this as a function-local `static`, which is safe only when
+		// exactly one `ripser` instance is ever constructed per process (true
+		// for Ripser's own CLI main()). This library constructs a fresh
+		// `ripser` instance per frame (~3800 times per real pipeline run) -
+		// a `static` local here would keep referencing the FIRST instance's
+		// `*this` forever, a dangling reference after that instance is
+		// destroyed, causing a real, reproducible segfault on the second
+		// call. Removing `static` is behaviorally identical (set_simplex()
+		// fully resets the enumerator immediately after construction either
+		// way) and costs only a trivial extra construction per call.
+		simplex_boundary_enumerator facets(0, *this);
 		facets.set_simplex(simplex, dim);
 		while (facets.has_next()) {
 			diameter_entry_t facet = facets.next();
@@ -521,7 +532,18 @@ public:
 	}
 
 	diameter_entry_t get_zero_pivot_cofacet(const diameter_entry_t simplex, const index_t dim) {
-		static simplex_coboundary_enumerator cofacets(*this);
+// NOTE (gm-topology library adaptation): the reference implementation
+		// declared this as a function-local `static`, which is safe only when
+		// exactly one `ripser` instance is ever constructed per process (true
+		// for Ripser's own CLI main()). This library constructs a fresh
+		// `ripser` instance per frame (~3800 times per real pipeline run) -
+		// a `static` local here would keep referencing the FIRST instance's
+		// `*this` forever, a dangling reference after that instance is
+		// destroyed, causing a real, reproducible segfault on the second
+		// call. Removing `static` is behaviorally identical (set_simplex()
+		// fully resets the enumerator immediately after construction either
+		// way) and costs only a trivial extra construction per call.
+		simplex_coboundary_enumerator cofacets(*this);
 		cofacets.set_simplex(simplex, dim);
 		while (cofacets.has_next()) {
 			diameter_entry_t cofacet = cofacets.next();
@@ -669,7 +691,18 @@ public:
 	diameter_entry_t init_coboundary_and_get_pivot(const diameter_entry_t simplex,
 	                                               Column& working_coboundary, const index_t& dim,
 	                                               entry_hash_map& pivot_column_index) {
-		static simplex_coboundary_enumerator cofacets(*this);
+// NOTE (gm-topology library adaptation): the reference implementation
+		// declared this as a function-local `static`, which is safe only when
+		// exactly one `ripser` instance is ever constructed per process (true
+		// for Ripser's own CLI main()). This library constructs a fresh
+		// `ripser` instance per frame (~3800 times per real pipeline run) -
+		// a `static` local here would keep referencing the FIRST instance's
+		// `*this` forever, a dangling reference after that instance is
+		// destroyed, causing a real, reproducible segfault on the second
+		// call. Removing `static` is behaviorally identical (set_simplex()
+		// fully resets the enumerator immediately after construction either
+		// way) and costs only a trivial extra construction per call.
+		simplex_coboundary_enumerator cofacets(*this);
 		bool check_for_emergent_pair = true;
 		cofacet_entries.clear();
 		cofacets.set_simplex(simplex, dim);
@@ -692,7 +725,18 @@ public:
 	template <typename Column>
 	void add_simplex_coboundary(const diameter_entry_t simplex, const index_t& dim,
 	                            Column& working_reduction_column, Column& working_coboundary) {
-		static simplex_coboundary_enumerator cofacets(*this);
+// NOTE (gm-topology library adaptation): the reference implementation
+		// declared this as a function-local `static`, which is safe only when
+		// exactly one `ripser` instance is ever constructed per process (true
+		// for Ripser's own CLI main()). This library constructs a fresh
+		// `ripser` instance per frame (~3800 times per real pipeline run) -
+		// a `static` local here would keep referencing the FIRST instance's
+		// `*this` forever, a dangling reference after that instance is
+		// destroyed, causing a real, reproducible segfault on the second
+		// call. Removing `static` is behaviorally identical (set_simplex()
+		// fully resets the enumerator immediately after construction either
+		// way) and costs only a trivial extra construction per call.
+		simplex_coboundary_enumerator cofacets(*this);
 		working_reduction_column.push(simplex);
 		cofacets.set_simplex(simplex, dim);
 		while (cofacets.has_next()) {
@@ -1168,6 +1212,12 @@ void print_usage_and_exit(int exit_code) {
 	exit(exit_code);
 }
 
+// Guarded behind RIPSER_BUILD_CLI so this header can be vendored as a
+// library (gm-topology includes it from multiple translation units) -
+// the reference implementation's own CLI main() would otherwise collide
+// with every other main() in any executable that links against it.
+// Nothing about the algorithm itself is touched by this guard.
+#ifdef RIPSER_BUILD_CLI
 int main(int argc, char** argv) {
 	const char* filename = nullptr;
 
@@ -1291,3 +1341,4 @@ int main(int argc, char** argv) {
 		exit(0);
 	}
 }
+#endif  // RIPSER_BUILD_CLI

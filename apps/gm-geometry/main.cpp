@@ -280,6 +280,15 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     std::vector<std::uint8_t> edge_in_knn;
 
     std::optional<Eigen::MatrixXd> previous_aligned;
+    // Cached separately from previous_aligned (which gets overwritten
+    // to the CURRENT frame's coordinates further down, before the
+    // Wasserstein computation below used to run - comparing a
+    // diagram to itself, which is why wasserstein_distance always
+    // came out exactly 0.0 on real multi-frame data despite passing
+    // every single-frame unit test). This holds the prior frame's
+    // persistence diagram specifically for that comparison, updated
+    // only after this iteration's Wasserstein distance is computed.
+    std::optional<gm::topology::PersistenceFeatures> previous_persistence;
 
     for (Eigen::Index frame_end = window_days - 1; frame_end < total_t; ++frame_end) {
         Eigen::MatrixXd window = panel->returns.block(frame_end - window_days + 1, 0, window_days, n);
@@ -340,16 +349,18 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
         double h0_persist = current_persistence.h0_total_persistence;
         double h1_persist = current_persistence.h1_total_persistence;
 
-        // Wasserstein distance from previous frame
+        // Wasserstein distance from the PRIOR frame's diagram - uses
+        // previous_persistence (still holding last iteration's value at
+        // this point), not previous_aligned (already overwritten to this
+        // frame's coordinates above), and not a redundant second
+        // compute_persistence() call on the same data.
         double wasserstein_dist = 0.0;
-        if (!regime_h0_persistence.empty()) {
-            auto prev_persist = gm::topology::compute_persistence(*previous_aligned);
-            if (prev_persist) {
-                auto wd_result = gm::topology::wasserstein_distance(
-                    prev_persist->h0_pairs, current_persistence.h0_pairs);
-                if (wd_result) wasserstein_dist = *wd_result;
-            }
+        if (previous_persistence.has_value()) {
+            auto wd_result = gm::topology::wasserstein_distance(
+                previous_persistence->h0_pairs, current_persistence.h0_pairs);
+            if (wd_result) wasserstein_dist = *wd_result;
         }
+        previous_persistence = current_persistence;
 
         // Tear detection: flag if topology changing significantly
         bool tear_flag = false;

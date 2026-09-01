@@ -21,3 +21,7 @@ target_include_directories(gm_topology INTERFACE
 )
 
 target_compile_features(gm_topology INTERFACE cxx_std_20)
+
+if (GM_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
