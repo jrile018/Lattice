@@ -3,6 +3,7 @@
 // on a rolling window across the full price history (ADR-009/ADR-010,
 // ADR §6.1-6.2, ADR §13 M2: "geometry artifacts for full history in
 // <60s locally; structural change metric spikes at known events").
+// ADR-012: Topology (persistent homology) as shape-change veto.
 //
 // Reads gm-ingest's upstream artifacts (sibling stage directory, same
 // convention as gm-ingest reading gm-universe's output): prefers
@@ -20,8 +21,8 @@
 #include <gm-geometry/procrustes.hpp>
 #include <gm-geometry/rmt.hpp>
 #include <gm-geometry/shrinkage.hpp>
-#include <gm-io/parquet.hpp>
 #include <gm-topology/ripser_wrapper.hpp>
+#include <gm-io/parquet.hpp>
 #include <gm-io/table.hpp>
 
 #include <Eigen/Dense>
@@ -29,7 +30,9 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <numeric>
+
 #include <set>
 
 namespace {
@@ -270,10 +273,6 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     std::vector<double> out_x, out_y, out_z;
     std::vector<std::string> regime_dates;
     std::vector<double> regime_structural_change;
-    std::vector<double> regime_h0_persistence;
-    std::vector<double> regime_h1_persistence;
-    std::vector<double> regime_wasserstein_distance;
-    std::vector<std::uint8_t> regime_tear_flag;
     std::vector<std::string> edge_dates, edge_ticker_a, edge_ticker_b;
     std::vector<double> edge_distances;
     std::vector<std::uint8_t> edge_in_mst;
@@ -331,45 +330,6 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
         }
         previous_aligned = aligned;
 
-        // ADR-012: Compute H0/H1 persistence and Wasserstein distance
-        gm::topology::PersistenceFeatures current_persistence;
-        auto persist_result = gm::topology::compute_persistence(aligned);
-        if (!persist_result) return tl::unexpected(persist_result.error());
-        current_persistence = *persist_result;
-
-        double h0_persist = current_persistence.h0_total_persistence;
-        double h1_persist = current_persistence.h1_total_persistence;
-
-        // Wasserstein distance from previous frame
-        double wasserstein_dist = 0.0;
-        if (!regime_h0_persistence.empty()) {
-            auto prev_persist = gm::topology::compute_persistence(*previous_aligned);
-            if (prev_persist) {
-                auto wd_result = gm::topology::wasserstein_distance(
-                    prev_persist->h0_pairs, current_persistence.h0_pairs);
-                if (wd_result) wasserstein_dist = *wd_result;
-            }
-        }
-
-        // Tear detection: flag if topology changing significantly
-        bool tear_flag = false;
-        if (h1_persist > h0_persist * 0.15) tear_flag = true;
-        if (!regime_wasserstein_distance.empty() && regime_wasserstein_distance.size() > 10) {
-            double mean_wd = std::accumulate(regime_wasserstein_distance.begin(),
-                regime_wasserstein_distance.end(), 0.0) / static_cast<double>(regime_wasserstein_distance.size());
-            double var_wd = 0.0;
-            for (double w : regime_wasserstein_distance)
-                var_wd += (w - mean_wd) * (w - mean_wd);
-            double std_wd = std::sqrt(var_wd / static_cast<double>(regime_wasserstein_distance.size()));
-            if (std_wd > 0.0 && wasserstein_dist > mean_wd + 1.5 * std_wd)
-                tear_flag = true;
-        }
-
-        regime_h0_persistence.push_back(h0_persist);
-        regime_h1_persistence.push_back(h1_persist);
-        regime_wasserstein_distance.push_back(wasserstein_dist);
-        regime_tear_flag.push_back(tear_flag ? 1 : 0);
-
         for (Eigen::Index i = 0; i < n; ++i) {
             out_dates.push_back(frame_date);
             out_tickers.push_back(active_tickers[static_cast<std::size_t>(i)]);
@@ -394,14 +354,6 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     gm::io::Table regime_table;
     if (auto r = regime_table.add_string_column("date", std::move(regime_dates)); !r) return tl::unexpected(r.error());
     if (auto r = regime_table.add_double_column("structural_change", std::move(regime_structural_change)); !r)
-        return tl::unexpected(r.error());
-    if (auto r = regime_table.add_double_column("h0_total_persistence", std::move(regime_h0_persistence)); !r)
-        return tl::unexpected(r.error());
-    if (auto r = regime_table.add_double_column("h1_total_persistence", std::move(regime_h1_persistence)); !r)
-        return tl::unexpected(r.error());
-    if (auto r = regime_table.add_double_column("wasserstein_distance_from_prev_frame", std::move(regime_wasserstein_distance)); !r)
-        return tl::unexpected(r.error());
-    if (auto r = regime_table.add_bool_column("tear_flag", std::move(regime_tear_flag)); !r)
         return tl::unexpected(r.error());
 
     auto write2 = gm::io::write_parquet(regime_table, output_dir / "regime.parquet");

@@ -1,0 +1,57 @@
+
+        // ADR-012: Compute H0/H1 persistence and Wasserstein distance for shape-change detection
+        gm::topology::PersistenceFeatures current_persistence;
+        auto persist_result = gm::topology::compute_persistence(aligned);
+        if (!persist_result) return tl::unexpected(persist_result.error());
+        current_persistence = *persist_result;
+
+        double h0_persist = current_persistence.h0_total_persistence;
+        double h1_persist = current_persistence.h1_total_persistence;
+
+        // Compute Wasserstein distance from previous frame's persistence diagram
+        double wasserstein_dist = 0.0;
+        if (!regime_h0_persistence.empty()) {
+            // Compute persistence for previous frame to compare
+            // Note: we recompute to avoid storing all past diagrams; in production
+            // could cache previous persistence features
+            auto prev_persist_result = gm::topology::compute_persistence(*previous_aligned);
+            if (prev_persist_result) {
+                auto wd_result = gm::topology::wasserstein_distance(
+                    prev_persist_result->h0_pairs, current_persistence.h0_pairs);
+                if (wd_result) {
+                    wasserstein_dist = *wd_result;
+                }
+            }
+        }
+
+        // ADR-012 §8.1: Tear detection heuristic
+        // tear_flag = true when the topology is changing significantly, indicating
+        // that the point cloud is tearing/restructuring rather than smoothly deforming.
+        // Threshold is empirically determined from historical distribution.
+        bool tear_flag = false;
+        if (!regime_wasserstein_distance.empty()) {
+            // Check if Wasserstein distance is anomalously high
+            double mean_wd = std::accumulate(regime_wasserstein_distance.begin(),
+                                             regime_wasserstein_distance.end(), 0.0) /
+                             static_cast<double>(regime_wasserstein_distance.size());
+            double std_wd = 0.0;
+            for (double wd : regime_wasserstein_distance) {
+                std_wd += (wd - mean_wd) * (wd - mean_wd);
+            }
+            std_wd = std::sqrt(std_wd / static_cast<double>(regime_wasserstein_distance.size()));
+            
+            // Flag if Wasserstein distance > mean + 1.5*sigma (top ~10-20% of distribution)
+            if (std_wd > 0.0 && wasserstein_dist > mean_wd + 1.5 * std_wd) {
+                tear_flag = true;
+            }
+        }
+        // Also flag if H1 persistence is significantly higher than H0
+        // (indicating appearance of holes/loops, a sign of topological complexity)
+        if (h1_persist > h0_persist * 0.15) {
+            tear_flag = true;
+        }
+
+        regime_h0_persistence.push_back(h0_persist);
+        regime_h1_persistence.push_back(h1_persist);
+        regime_wasserstein_distance.push_back(wasserstein_dist);
+        regime_tear_flag.push_back(tear_flag ? 1 : 0);

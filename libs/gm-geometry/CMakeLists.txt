@@ -25,6 +25,7 @@ target_include_directories(gm-geometry-lib
 target_link_libraries(gm-geometry-lib
   PUBLIC
     gm::core
+    gm::topology
     Eigen3::Eigen
 )
 
