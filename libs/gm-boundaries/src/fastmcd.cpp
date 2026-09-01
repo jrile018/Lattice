@@ -93,9 +93,19 @@ McdCandidate run_cstep_trial(const Eigen::MatrixXd& points, const std::vector<in
         double prev_log_det = candidate.log_determinant;
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(covariance);
         candidate.log_determinant = 0.5 * solver.eigenvalues().array().log().sum();
+        // Keep the candidate's location/covariance in sync with whatever
+        // produced this log-determinant on EVERY iteration, not just on
+        // convergence - a C-step that hits kMaxCstepIterations without
+        // meeting the tolerance (which happens on real, larger datasets
+        // even though it never did on the tiny synthetic test fixtures)
+        // must still return a valid (location, covariance) pair matching
+        // its last log_determinant, not the default-constructed empty
+        // matrices McdCandidate started with - that mismatch (a "valid"
+        // log_determinant paired with an empty covariance) is what made
+        // fit_fastmcd's SelfAdjointEigenSolver crash on real data.
+        candidate.location = location;
+        candidate.covariance = covariance;
         if (iter > 0 && std::abs(candidate.log_determinant - prev_log_det) < kCstepTolerance) {
-            candidate.location = std::move(location);
-            candidate.covariance = std::move(covariance);
             candidate.converged_iterations = iter + 1;
             return candidate;
         }
