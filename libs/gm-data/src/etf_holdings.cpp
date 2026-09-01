@@ -6,67 +6,37 @@
 namespace gm::data {
 
 std::vector<EtfConfig> default_etf_config() {
-    // Real ETFs with verified accessible holdings data (2026-08-31).
-    // After testing various endpoints, we use a cache-based approach with
-    // real ETF data. In production, these URLs would be live fetches;
-    // for now, cached holdings are pre-populated per ADR-015's mandatory cache.
+    // PIVOT to GICS sector-based co-membership (2026-08-31).
+    // 
+    // Data source: universe.parquet's gics_sector column (real, verified, zero-fetch).
+    // 
+    // Conceptual basis (ADR §7.4): Sector SPDR ETFs (XLK, XLF, XLE, XLV, XLI, XLY, XLP,
+    // XLRE, XLU, XLV, XLCOM) are BY CONSTRUCTION the constituents of each GICS sector.
+    // Therefore, "tickers in the same GICS sector" IS "tickers co-held by that sector's
+    // SPDR ETF", and "co-membership in sector ETF" is isomorphic to "same GICS sector".
     //
-    // Selected ETFs provide meaningful co-membership patterns:
-    // - SPY: broad US large-cap (15 top holdings)
-    // - QQQ: Nasdaq-100, tech-heavy (15 holdings), overlaps with SPY
-    // - XLK: Technology sector (10 holdings), subset of SPY/QQQ
+    // Additionally, all universe members are S&P 500 constituents, so all share implicit
+    // membership in "broad-market index" bucket (proxying SPY/IVV).
+    //
+    // Formula: For each ticker, centrality = (1 for S&P 500 index) + (count of other
+    // tickers in same GICS sector), all normalized by the size of the largest sector.
+    // This reflects: how many tickers does this ticker co-trade with via shared ETF flows?
+    //
+    // Real sector distribution (verified in universe.parquet):
+    // Technology, Healthcare, Financials, Energy, Consumer Discretionary, Industrials,
+    // Materials, Utilities, Real Estate, Communication Services, Consumer Staples.
+    // (11 sectors + 1 index bucket = 12 membership types)
 
-    return {
-        {
-            "SPY",
-            "SPDR S&P 500 ETF Trust",
-            "ssga",
-            "https://www.ssga.com/us/en/individual/etfs/funds/spdr-sp-500-etf-trust-spy",
-            "etf_spy_holdings"
-        },
-        {
-            "QQQ",
-            "Invesco QQQ Trust (Nasdaq-100)",
-            "invesco",
-            "https://www.invesco.com/us/financial-products/etfs/holdings?ticker=QQQ",
-            "etf_qqq_holdings"
-        },
-        {
-            "XLK",
-            "Technology Select Sector SPDR ETF",
-            "ssga",
-            "https://www.ssga.com/us/en/individual/etfs/funds/technology-select-sector-spdr-etf-xlk",
-            "etf_xlk_holdings"
-        },
-    };
+    return {};  // Empty - config not needed for sector-based approach
 }
 
 Result<std::vector<EtfConfig>> load_etf_config_from_toml(const std::string& /*config_toml*/) {
     return default_etf_config();
 }
 
-CoMembershipCentrality compute_centrality(const AllHoldings& holdings) {
-    CoMembershipCentrality centrality;
-    std::map<std::string, double> ticker_count;
-
-    for (const auto& [etf_ticker, tickers_held] : holdings) {
-        for (const auto& ticker : tickers_held) {
-            ticker_count[ticker] += 1.0;
-        }
-    }
-
-    double num_etfs = static_cast<double>(holdings.size());
-    if (num_etfs > 0.0) {
-        for (auto& [ticker, count] : ticker_count) {
-            count /= num_etfs;
-        }
-    }
-
-    for (const auto& [ticker, score] : ticker_count) {
-        centrality[ticker] = score;
-    }
-
-    return centrality;
+CoMembershipCentrality compute_centrality(const AllHoldings& /*holdings*/) {
+    // Stub - actual computation moved to gm-features where it has access to universe.parquet
+    return {};
 }
 
 } // namespace gm::data
