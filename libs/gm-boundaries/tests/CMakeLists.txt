@@ -1,5 +1,6 @@
 add_executable(gm-boundaries-tests
   mahalanobis_test.cpp
+  fastmcd_test.cpp
   kde_test.cpp
   marching_tetrahedra_test.cpp
 )
