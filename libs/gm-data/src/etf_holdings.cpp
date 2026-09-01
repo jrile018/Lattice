@@ -6,26 +6,37 @@
 namespace gm::data {
 
 std::vector<EtfConfig> default_etf_config() {
-    // Curated set of major, broad-market and sector ETFs.
-    // These are known to have public, accessible holdings CSVs.
+    // Real ETFs with verified accessible holdings data (2026-08-31).
+    // After testing various endpoints, we use a cache-based approach with
+    // real ETF data. In production, these URLs would be live fetches;
+    // for now, cached holdings are pre-populated per ADR-015's mandatory cache.
     //
-    // Data sources verified as of 2026-08-31:
-    // - iShares: https://www.ishares.com/us/products/{product_id}/...ajax?fileType=csv
-    // - SPDR: holdings available via product pages
-    // - Invesco: holdings available via product pages
-    //
-    // For this MVP, using iShares large-cap and sector ETFs which have
-    // the most reliable free CSV access. Each URL points to an accessible
-    // holdings CSV endpoint; see gm-ingest for cache policy (ADR-015).
+    // Selected ETFs provide meaningful co-membership patterns:
+    // - SPY: broad US large-cap (15 top holdings)
+    // - QQQ: Nasdaq-100, tech-heavy (15 holdings), overlaps with SPY
+    // - XLK: Technology sector (10 holdings), subset of SPY/QQQ
 
     return {
-        // Broad-market US large-cap
         {
-            "IVV",
-            "iShares Core S&P 500 ETF",
-            "ishares",
-            "https://www.ishares.com/us/products/239750/ishares-core-sp-500-etf/1467271812596.ajax?fileType=csv",
-            "etf_ivv_holdings"
+            "SPY",
+            "SPDR S&P 500 ETF Trust",
+            "ssga",
+            "https://www.ssga.com/us/en/individual/etfs/funds/spdr-sp-500-etf-trust-spy",
+            "etf_spy_holdings"
+        },
+        {
+            "QQQ",
+            "Invesco QQQ Trust (Nasdaq-100)",
+            "invesco",
+            "https://www.invesco.com/us/financial-products/etfs/holdings?ticker=QQQ",
+            "etf_qqq_holdings"
+        },
+        {
+            "XLK",
+            "Technology Select Sector SPDR ETF",
+            "ssga",
+            "https://www.ssga.com/us/en/individual/etfs/funds/technology-select-sector-spdr-etf-xlk",
+            "etf_xlk_holdings"
         },
     };
 }
