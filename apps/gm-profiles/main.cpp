@@ -18,6 +18,18 @@ namespace {
 
 gm::VoidResult run_gm_profiles(const gm::Config& config, const std::filesystem::path& output_dir,
                                 gm::Manifest& manifest) {
+    // This stage never created its own output directory (unlike every
+    // other stage app, e.g. gm-signals) - confirmed by an actual real
+    // run against the real universe: SEC fetching genuinely succeeded
+    // (259s of real EDGAR calls), but the final profiles.json write
+    // failed with kIoFailure because output_dir didn't exist yet.
+    std::error_code ec;
+    std::filesystem::create_directories(output_dir, ec);
+    if (ec) {
+        return tl::unexpected(
+            gm::Error::make(gm::ErrorCode::kIoFailure, "failed to create output directory", output_dir.string()));
+    }
+
     // Get upstream universe artifact path from config
     auto upstream_universe_path_str = config.get_string("upstream.universe_parquet");
     if (!upstream_universe_path_str) return tl::unexpected(upstream_universe_path_str.error());
@@ -48,7 +60,7 @@ gm::VoidResult run_gm_profiles(const gm::Config& config, const std::filesystem::
     }
 
     // Initialize HTTP cache for SEC fetching
-    auto cache_dir = config.get_string_or("http_cache.directory", "cache");
+    auto cache_dir = config.get_string_or("http_cache.directory", "data/raw/profiles_cache");
     gm::io::HttpCache cache(cache_dir);
 
     // Fetch profiles for each unique CIK
