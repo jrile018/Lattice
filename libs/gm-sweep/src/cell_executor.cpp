@@ -127,6 +127,51 @@ Result<double> extract_sharpe_from_backtest_results(const fs::path& backtest_res
     }
 }
 
+Result<DsrInputs> extract_dsr_inputs_from_backtest_results(const fs::path& backtest_results_path) {
+    if (!fs::exists(backtest_results_path)) {
+        return tl::unexpected(gm::Error{
+            gm::ErrorCode::kNotFound,
+            "backtest_results.json not found: " + backtest_results_path.string(), ""});
+    }
+
+    try {
+        std::ifstream file{backtest_results_path};
+        if (!file) {
+            return tl::unexpected(gm::Error{
+                gm::ErrorCode::kIoFailure,
+                "cannot open backtest_results.json: " + backtest_results_path.string(), ""});
+        }
+
+        nlohmann::json results;
+        file >> results;
+        file.close();
+
+        const auto require_number = [&](const char* key) -> Result<double> {
+            if (!results.contains(key) || results[key].is_null() || !results[key].is_number()) {
+                return tl::unexpected(gm::Error{
+                    gm::ErrorCode::kValidationFailure,
+                    std::string("backtest_results.json missing or non-numeric field: ") + key, ""});
+            }
+            return results[key].get<double>();
+        };
+
+        auto sharpe = require_number("sharpe_ratio_daily");
+        if (!sharpe) return tl::unexpected(sharpe.error());
+        auto skew = require_number("skewness");
+        if (!skew) return tl::unexpected(skew.error());
+        auto kurt = require_number("kurtosis");
+        if (!kurt) return tl::unexpected(kurt.error());
+        auto days = require_number("trading_days_with_positions");
+        if (!days) return tl::unexpected(days.error());
+
+        return DsrInputs{*sharpe, static_cast<std::int64_t>(*days), *skew, *kurt};
+    } catch (const std::exception& e) {
+        return tl::unexpected(gm::Error{
+            gm::ErrorCode::kParseFailure,
+            std::string("failed to parse backtest_results.json: ") + e.what(), ""});
+    }
+}
+
 Result<void> link_upstream_artifacts(
     const fs::path& cell_dir,
     const fs::path& upstream_root) {

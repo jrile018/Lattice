@@ -144,14 +144,30 @@ int main(int argc, char** argv) {
         return 1;
     }
     const auto& trial_stats = trial_stats_result.value();
-    double best_sharpe = *std::max_element(successful_sharpes.begin(), successful_sharpes.end());
+    // Find the cell that actually produced the best (max) Sharpe, so its
+    // OWN real trading_days_with_positions/skewness/kurtosis - not a
+    // T=252-Normal placeholder - go into the DSR calculation. Every
+    // cell's backtest_results.json already reports its own real
+    // moments; substituting a placeholder when the real figure is one
+    // struct field away was a real accuracy gap, not just cosmetic:
+    // hand-verifying this formula against the real single-run DSR
+    // (1.77e-06 at T=1121, skew=0.63, kurtosis=13.84) showed T alone
+    // shifts the result by orders of magnitude.
+    const execution::CellResult* best_cell = nullptr;
+    for (const auto& cell_result : state.cell_results) {
+        if (!cell_result.success) continue;
+        if (!best_cell || cell_result.sharpe_ratio > best_cell->sharpe_ratio) {
+            best_cell = &cell_result;
+        }
+    }
+    double best_sharpe = best_cell->sharpe_ratio;
     auto sr0_result = gm::backtest::expected_max_sharpe(trial_stats.trial_sharpe_variance, n_successful);
     if (!sr0_result.has_value()) {
         return 1;
     }
     double sr0 = *sr0_result;
     auto dsr_result = gm::backtest::deflated_sharpe_ratio(
-        best_sharpe, sr0, 252, 0.0, 3.0);
+        best_sharpe, sr0, static_cast<int>(best_cell->trading_days), best_cell->skewness, best_cell->kurtosis);
     if (!dsr_result.has_value()) {
         return 1;
     }
@@ -161,6 +177,9 @@ int main(int argc, char** argv) {
     sweep_results["n_successful"] = n_successful;
     sweep_results["n_failed"] = n_failed;
     sweep_results["best_sharpe"] = best_sharpe;
+    sweep_results["best_cell_trading_days"] = best_cell->trading_days;
+    sweep_results["best_cell_skewness"] = best_cell->skewness;
+    sweep_results["best_cell_kurtosis"] = best_cell->kurtosis;
     sweep_results["sr0"] = sr0;
     sweep_results["dsr"] = dsr;
     sweep_results["failed_cells"] = failed_cells_json;

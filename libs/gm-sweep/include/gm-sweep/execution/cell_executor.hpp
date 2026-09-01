@@ -3,6 +3,7 @@
 #include <gm-core/error.hpp>
 #include <gm-sweep/parameter_grid.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <toml++/toml.hpp>
 
@@ -22,6 +23,22 @@ namespace fs = std::filesystem;
 
 // Parse gm-backtest backtest_results.json and extract sharpe_ratio_daily.
 [[nodiscard]] Result<double> extract_sharpe_from_backtest_results(
+    const fs::path& backtest_results_path);
+
+// The real per-cell inputs a correct DSR calculation needs (ADR-014) -
+// trading_days_with_positions (T), skewness, kurtosis - as opposed to
+// a Normal/T=252 placeholder. backtest_results.json already reports
+// all of these per cell (each cell is its own independent backtest),
+// so there is no reason to substitute a placeholder when the real
+// figure is one file read away.
+struct DsrInputs {
+    double sharpe_ratio_daily;
+    std::int64_t trading_days;
+    double skewness;
+    double kurtosis;
+};
+
+[[nodiscard]] Result<DsrInputs> extract_dsr_inputs_from_backtest_results(
     const fs::path& backtest_results_path);
 
 // Symlink upstream artifacts (gm-universe through gm-boundaries) into cell directory.

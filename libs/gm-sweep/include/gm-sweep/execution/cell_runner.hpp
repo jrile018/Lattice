@@ -3,6 +3,7 @@
 #include <gm-core/error.hpp>
 #include <gm-sweep/parameter_grid.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -14,6 +15,9 @@ struct CellResult {
     int cell_id;
     bool success;
     double sharpe_ratio;
+    std::int64_t trading_days = 0;  // real T for this cell's DSR inputs (ADR-014), not a placeholder
+    double skewness = 0.0;
+    double kurtosis = 3.0;  // Normal default only used if a cell somehow lacks this field
     std::string error_message;
 };
 

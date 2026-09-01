@@ -57,15 +57,17 @@ CellResult execute_cell(
         return result;
     }
 
-    const auto& raw_table = base_config->raw();
-    auto* pipeline_ptr = raw_table.get("pipeline");
-    if (!pipeline_ptr || !pipeline_ptr->is_table()) {
-        result.error_message = "base config missing [pipeline] section";
-        spdlog::warn("Cell {}: {}", cell.cell_id, result.error_message);
-        return result;
-    }
-
-    auto overridden_table = override_config_with_cell_params(*pipeline_ptr->as_table(), cell);
+    // The real config files this project uses (config/params.toml) are
+    // flat top-level tables ([universe], [boundaries], [signals], ...)
+    // - there is no [pipeline] wrapper section anywhere else in this
+    // codebase (every other stage's Config::get_double_or("boundaries.alpha", ...)
+    // etc. resolves straight against the top-level table). Overriding
+    // against a nonexistent [pipeline] indirection would make every
+    // cell fail with "base config missing [pipeline] section" against
+    // any real config, which is exactly what happened until this was
+    // checked against the actual file on disk instead of only a
+    // synthetic fixture.
+    auto overridden_table = override_config_with_cell_params(base_config->raw(), cell);
     if (!overridden_table) {
         result.error_message = "failed to apply cell overrides: " + overridden_table.error().to_string();
         spdlog::warn("Cell {}: {}", cell.cell_id, result.error_message);
@@ -147,16 +149,20 @@ CellResult execute_cell(
     }
 
     fs::path backtest_results = *cell_dir / "gm-backtest" / "backtest_results.json";
-    auto sharpe = extract_sharpe_from_backtest_results(backtest_results);
-    if (!sharpe) {
-        result.error_message = "failed to extract sharpe_ratio_daily: " + sharpe.error().to_string();
+    auto dsr_inputs = extract_dsr_inputs_from_backtest_results(backtest_results);
+    if (!dsr_inputs) {
+        result.error_message = "failed to extract DSR inputs: " + dsr_inputs.error().to_string();
         spdlog::warn("Cell {}: {}", cell.cell_id, result.error_message);
         return result;
     }
 
     result.success = true;
-    result.sharpe_ratio = *sharpe;
-    spdlog::info("Cell {}: success, sharpe_ratio_daily = {:.6f}", cell.cell_id, result.sharpe_ratio);
+    result.sharpe_ratio = dsr_inputs->sharpe_ratio_daily;
+    result.trading_days = dsr_inputs->trading_days;
+    result.skewness = dsr_inputs->skewness;
+    result.kurtosis = dsr_inputs->kurtosis;
+    spdlog::info("Cell {}: success, sharpe_ratio_daily = {:.6f}, T={}, skew={:.4f}, kurt={:.4f}",
+                 cell.cell_id, result.sharpe_ratio, result.trading_days, result.skewness, result.kurtosis);
     return result;
 }
 
