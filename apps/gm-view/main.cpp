@@ -27,6 +27,8 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <set>
+#include <map>
 
 #include "camera.hpp"
 #include "data_loader.hpp"
@@ -45,10 +47,60 @@ struct AppState {
 
     gm::view::OrbitCamera camera;
     bool camera_initialized = false;
+    // UI state for three new tabs
+    int selected_tab = 0;  // 0=Manifold, 1=2D Pairs, 2=3D Sectors, 3=Evolution
+    int selected_ticker1_idx = -1;
+    int selected_ticker2_idx = -1;
+    std::vector<const char*> available_ticker_labels;
+    bool show_sectors = false;
+    bool show_learn_panel = false;
+    std::string learn_panel_ticker;
 };
 
 void glfw_error_callback(int error, const char* description) {
-    spdlog::error("gm-view: GLFW error {}: {}", error, description);
+    spdlog::error("gm-view: GLFW error {}
+
+std::uint32_t sector_to_color(const std::string& sector) {
+    static const std::vector<std::uint32_t> palette = {
+        0xFF6B6BFF, 0xFF4ECDC4, 0xFFF7DC6F, 0xBB86FCFF, 0xFF03DAC6,
+        0xFFCF6679, 0xFFB39DDB, 0xFF81C784, 0xFFFFB74D, 0xFF64B5F6,
+    }
+
+std::vector<std::pair<int, double>> get_spreads_for_ticker(
+    const gm::view::LoadedRun& loaded, const std::string& ticker, const std::string& date) {
+    std::vector<std::pair<int, double>> result;
+    for (const auto& s : loaded.spreads) {
+        if (s.ticker == ticker && s.date == date) {
+            result.push_back({static_cast<int>(result.size()), s.spread});
+        }
+    }
+    return result;
+}
+
+std::vector<std::pair<std::string, double>> get_peer_basket(
+    const gm::view::LoadedRun& loaded, const std::string& ticker, const std::string& date) {
+    std::vector<std::pair<std::string, double>> r;
+    for (const auto& b : loaded.baskets) {
+        if (b.ticker == ticker && b.date == date) {
+            r.push_back({b.neighbor_ticker, b.weight});
+        }
+    }
+    std::sort(r.begin(), r.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    return r;
+}
+
+std::vector<gm::view::Excursion> get_excursions_for_ticker(
+    const gm::view::LoadedRun& loaded, const std::string& ticker) {
+    std::vector<gm::view::Excursion> r;
+    for (const auto& e : loaded.excursions) {
+        if (e.ticker == ticker) r.push_back(e);
+    }
+    return r;
+}
+;
+    std::size_t hash = std::hash<std::string>{}(sector) % palette.size();
+    return palette[hash];
+}: {}", error, description);
 }
 
 /// Recolors/repositions the uploaded point cloud for `frame_idx` and
@@ -59,6 +111,11 @@ void glfw_error_callback(int error, const char* description) {
 void upload_frame(gm::view::PointCloudRenderer& renderer, AppState& state, int frame_idx) {
     if (frame_idx < 0 || static_cast<std::size_t>(frame_idx) >= state.loaded.frames.size()) return;
     const auto& frame = state.loaded.frames[static_cast<std::size_t>(frame_idx)];
+
+    state.available_ticker_labels.clear();
+    for (const auto& t : frame.tickers) {
+        state.available_ticker_labels.push_back(t.c_str());
+    }
 
     std::vector<gm::view::PointVertex> verts;
     verts.reserve(frame.positions.size());
@@ -80,7 +137,17 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, AppState& state, int f
         // Plain, single color for this first pass - color-by-depth/
         // sector/momentum (ADR-018's toggle list) is follow-up work
         // once View A/B scores are wired into the loader.
-        verts.push_back({p[0], p[1], p[2], 0.35f, 0.65f, 1.0f});
+        std::uint32_t color = 0x5A85FFFF;
+        if (state.show_sectors) {
+            auto meta_it = state.loaded.ticker_metadata.find(ticker);
+            if (meta_it != state.loaded.ticker_metadata.end()) {
+                color = sector_to_color(meta_it->second.gics_sector);
+            }
+        }
+        float r = ((color >> 24) & 0xFF) / 255.0f;
+        float g = ((color >> 16) & 0xFF) / 255.0f;
+        float b = ((color >> 8) & 0xFF) / 255.0f;
+        verts.push_back({p[0], p[1], p[2], r, g, b});
     }
     renderer.upload(verts);
 
@@ -265,7 +332,9 @@ int main(int argc, char** argv) {
         // rest of the content silently clips instead of the window
         // growing to show it. Found by actually screenshotting the
         // running app, not by reading the ImGui docs and assuming.
-        ImGui::Begin("gm-view", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(400, 750), ImGuiCond_FirstUseEver);
+        ImGui::Begin("gm-view Control Panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
         ImGui::Text("Runs (%s)", runs_base_dir.c_str());
         if (state.runs.empty()) {
             ImGui::TextDisabled("No runs found - run gm-run first.");
@@ -295,15 +364,202 @@ int main(int argc, char** argv) {
                         state.loaded.frames[static_cast<std::size_t>(state.current_frame)].tickers.size());
             ImGui::TextDisabled("Left-drag to orbit, scroll to zoom.");
 
-            if (!state.loaded.structural_change.empty()) {
+            // Tab selection
+            ImGui::Separator();
+            ImGui::BeginTabBar("ViewTabs");
+            if (ImGui::TabItemButton("Manifold", state.selected_tab == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                state.selected_tab = 0;
+            }
+            if (ImGui::TabItemButton("2D Pairs", state.selected_tab == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                state.selected_tab = 1;
+            }
+            if (ImGui::TabItemButton("3D Sectors", state.selected_tab == 2 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                state.selected_tab = 2;
+            }
+            if (ImGui::TabItemButton("Evolution", state.selected_tab == 3 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                state.selected_tab = 3;
+            }
+            ImGui::EndTabBar();
+
+            // Tab-specific controls
+            if (state.selected_tab == 1) {
+                ImGui::Separator();
+                ImGui::Text("2D Pairs - Select Two Tickers");
+                if (ImGui::Combo("Ticker 1", &state.selected_ticker1_idx,
+                                state.available_ticker_labels.data(),
+                                static_cast<int>(state.available_ticker_labels.size()))) {
+                }
+                if (ImGui::Combo("Ticker 2", &state.selected_ticker2_idx,
+                                state.available_ticker_labels.data(),
+                                static_cast<int>(state.available_ticker_labels.size()))) {
+                }
+            } else if (state.selected_tab == 2) {
+                ImGui::Separator();
+                ImGui::Text("3D Sectors");
+                if (ImGui::Checkbox("Color by Sector", &state.show_sectors)) {
+                    upload_frame(renderer, state, state.current_frame);
+                }
+                ImGui::Text("Sectors in universe:");
+                std::set<std::string> sectors_seen;
+                std::map<std::string, int> sector_ticker_count;
+                for (const auto& [ticker, meta] : state.loaded.ticker_metadata) {
+                    sectors_seen.insert(meta.gics_sector);
+                    sector_ticker_count[meta.gics_sector]++;
+                }
+                ImGui::Text("  %zu sectors, %zu tickers", sectors_seen.size(), state.loaded.ticker_metadata.size());
+                for (const auto& sector : sectors_seen) {
+                    ImGui::Text("  - %s (%d tickers)", sector.c_str(), sector_ticker_count[sector]);
+                }
+                ImGui::Separator();
+                ImGui::Text("Sector Analysis (current frame):");
+                if (state.has_loaded_run && !state.loaded.frames.empty()) {
+                    const auto& frame = state.loaded.frames[static_cast<std::size_t>(state.current_frame)];
+                    std::map<std::string, int> frame_sector_counts;
+                    for (const auto& ticker : frame.tickers) {
+                        auto meta_it = state.loaded.ticker_metadata.find(ticker);
+                        if (meta_it != state.loaded.ticker_metadata.end()) {
+                            frame_sector_counts[meta_it->second.gics_sector]++;
+                        }
+                    }
+                    for (const auto& [sector, count] : frame_sector_counts) {
+                        ImGui::Text("  %s: %d points", sector.c_str(), count);
+                    }
+                }
+            } else if (state.selected_tab == 3) {
                 ImGui::Separator();
                 ImGui::Text("Structural change (Evolution)");
+            }
+
+            if (!state.loaded.structural_change.empty() && state.selected_tab == 3) {
+                ImGui::Separator();
                 if (ImPlot::BeginPlot("##regime", ImVec2(-1, 150))) {
                     ImPlot::PlotLine("structural_change", state.loaded.structural_change.data(),
                                      static_cast<int>(state.loaded.structural_change.size()));
                     ImPlot::EndPlot();
                 }
             }
+
+            // Learn panel - triggered by clicking 2D Pairs table or from manual selection
+            if (state.show_learn_panel && !state.learn_panel_ticker.empty()) {
+                ImGui::Separator();
+                ImGui::Text("Learn Panel: %s", state.learn_panel_ticker.c_str());
+                
+                auto meta_it = state.loaded.ticker_metadata.find(state.learn_panel_ticker);
+                if (meta_it != state.loaded.ticker_metadata.end()) {
+                    ImGui::Text("Company: %s", meta_it->second.security_name.c_str());
+                    ImGui::Text("Sector: %s", meta_it->second.gics_sector.c_str());
+                }
+                
+                if (state.has_loaded_run && !state.loaded.frames.empty()) {
+                    const auto& frame = state.loaded.frames[static_cast<std::size_t>(state.current_frame)];
+                    
+                    // Scores (Position & Depth in all views)
+                    std::map<std::string, std::vector<std::pair<std::string, double>>> scores_by_view;
+                    for (const auto& score : state.loaded.scores) {
+                        if (score.ticker == state.learn_panel_ticker && score.date == frame.date) {
+                            scores_by_view[score.view].push_back({score.estimator, score.depth});
+                        }
+                    }
+                    
+                    if (!scores_by_view.empty()) {
+                        ImGui::Separator();
+                        ImGui::Text("Position & Depth (View A/B/C):");
+                        if (ImGui::BeginTable("scores_tbl", 3, ImGuiTableFlags_Borders)) {
+                            ImGui::TableSetupColumn("View");
+                            ImGui::TableSetupColumn("Estimator");
+                            ImGui::TableSetupColumn("Depth");
+                            ImGui::TableHeadersRow();
+                            for (const auto& [view, depths] : scores_by_view) {
+                                for (const auto& [est, depth] : depths) {
+                                    ImGui::TableNextRow();
+                                    ImGui::TableSetColumnIndex(0); ImGui::Text("%s", view.c_str());
+                                    ImGui::TableSetColumnIndex(1); ImGui::Text("%s", est.c_str());
+                                    ImGui::TableSetColumnIndex(2); ImGui::Text("%.4f", depth);
+                                }
+                            }
+                            ImGui::EndTable();
+                        }
+                        
+                        // Buttons to open Learn panel
+                        if (ImGui::Button(("Learn about " + std::string(ticker1)).c_str(), ImVec2(-1, 0))) {
+                            state.show_learn_panel = true;
+                            state.learn_panel_ticker = ticker1;
+                        }
+                        if (ImGui::Button(("Learn about " + std::string(ticker2)).c_str(), ImVec2(-1, 0))) {
+                            state.show_learn_panel = true;
+                            state.learn_panel_ticker = ticker2;
+                        }
+                    }
+                    
+                    // Peer basket
+                    std::vector<std::pair<std::string, double>> basket;
+                    for (const auto& b : state.loaded.baskets) {
+                        if (b.ticker == state.learn_panel_ticker && b.date == frame.date) {
+                            basket.push_back({b.neighbor_ticker, b.weight});
+                        }
+                    }
+                    if (!basket.empty()) {
+                        ImGui::Separator();
+                        ImGui::Text("Peer Basket (Weights):");
+                        if (ImGui::BeginTable("basket_tbl", 2, ImGuiTableFlags_Borders)) {
+                            ImGui::TableSetupColumn("Ticker");
+                            ImGui::TableSetupColumn("Weight");
+                            ImGui::TableHeadersRow();
+                            for (const auto& [ticker, weight] : basket) {
+                                ImGui::TableNextRow();
+                                ImGui::TableSetColumnIndex(0); ImGui::Text("%s", ticker.c_str());
+                                ImGui::TableSetColumnIndex(1); ImGui::Text("%.4f", weight);
+                            }
+                            ImGui::EndTable();
+                        }
+                        
+                        // Buttons to open Learn panel
+                        if (ImGui::Button(("Learn about " + std::string(ticker1)).c_str(), ImVec2(-1, 0))) {
+                            state.show_learn_panel = true;
+                            state.learn_panel_ticker = ticker1;
+                        }
+                        if (ImGui::Button(("Learn about " + std::string(ticker2)).c_str(), ImVec2(-1, 0))) {
+                            state.show_learn_panel = true;
+                            state.learn_panel_ticker = ticker2;
+                        }
+                    }
+                    
+                    // Excursion history
+                    auto excursions = get_excursions_for_ticker(state.loaded, state.learn_panel_ticker);
+                    if (!excursions.empty()) {
+                        ImGui::Separator();
+                        ImGui::Text("Excursion History (%zu total):", excursions.size());
+                        if (ImGui::BeginTable("exc_hist", 5, ImGuiTableFlags_ScrollY | ImGuiTableFlags_Borders)) {
+                            ImGui::TableSetupColumn("Start");
+                            ImGui::TableSetupColumn("End");
+                            ImGui::TableSetupColumn("Duration");
+                            ImGui::TableSetupColumn("Peak Depth");
+                            ImGui::TableSetupColumn("Reverted");
+                            ImGui::TableHeadersRow();
+                            for (const auto& exc : excursions) {
+                                ImGui::TableNextRow();
+                                ImGui::TableSetColumnIndex(0); ImGui::Text("%s", exc.start_date.c_str());
+                                ImGui::TableSetColumnIndex(1); ImGui::Text("%s", exc.end_date.c_str());
+                                ImGui::TableSetColumnIndex(2); ImGui::Text("%d", exc.duration_days);
+                                ImGui::TableSetColumnIndex(3); ImGui::Text("%.4f", exc.peak_depth);
+                                ImGui::TableSetColumnIndex(4); ImGui::Text("%s", exc.reverted ? "Yes" : "No");
+                            }
+                            ImGui::EndTable();
+                        }
+                        
+                        // Buttons to open Learn panel
+                        if (ImGui::Button(("Learn about " + std::string(ticker1)).c_str(), ImVec2(-1, 0))) {
+                            state.show_learn_panel = true;
+                            state.learn_panel_ticker = ticker1;
+                        }
+                        if (ImGui::Button(("Learn about " + std::string(ticker2)).c_str(), ImVec2(-1, 0))) {
+                            state.show_learn_panel = true;
+                            state.learn_panel_ticker = ticker2;
+                        }
+                    }
+                }
+            }
+        }
         }
         ImGui::End();
 
