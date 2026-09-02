@@ -47,8 +47,9 @@ constexpr std::array<const char*, 9> kExpectedStages = {
 
 // gm-universe/gm-ingest (M1), gm-geometry (M2), gm-boundaries/
 // gm-signals (M3-M4), gm-report (M4's reversion study), gm-backtest
-// (M5's walk-forward engine), and gm-features (M6 ETF co-membership
-// layer) have all graduated from M0 stubs to real implementations (see
+// (M5's walk-forward engine), gm-features (M6 ETF co-membership
+// layer), and gm-profiles (M6 SEC company profiles for the viewer's
+// Learn panel) have all graduated from M0 stubs to real implementations (see
 // ADR §13 milestones). The per-stage artifact check below just needs to
 // know which real file each graduated stage produces instead of a
 // stub JSON placeholder - this is what lets one golden test track the
@@ -82,7 +83,7 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
     int exit_code = normalized_exit_code(std::system(cmd.str().c_str()));
     REQUIRE(exit_code == 0);
 
-    SECTION("top-level run manifest is valid and lists all 8 stages") {
+    SECTION("top-level run manifest is valid and lists all 9 stages") {
         auto manifest = gm::Manifest::read(run_dir / "manifest.json");
         REQUIRE(manifest.has_value());
         CHECK(manifest->stage() == "gm-run");
@@ -133,11 +134,13 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
                 // nested inside gm-profiles' own output_dir - so this
                 // checks run_dir/"meta", not run_dir/stage.
                 CHECK(std::filesystem::exists(run_dir / "meta" / "profiles.json"));
-            } else {
-                std::filesystem::path stub_artifact =
-                    run_dir / stage / (std::string{stage} + ".stub.json");
-                CHECK(std::filesystem::exists(stub_artifact));
             }
+            // No trailing else/.stub.json fallback: every one of
+            // kExpectedStages' 9 entries now has an explicit branch
+            // above (all 9 stages have graduated from M0 stubs to real
+            // implementations - see the comment above kExpectedStages).
+            // A fallback branch here would be permanently unreachable
+            // and was flagged as dead code by a real-data code review.
         }
     }
 

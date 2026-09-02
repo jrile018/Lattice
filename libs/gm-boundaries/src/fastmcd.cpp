@@ -2,26 +2,51 @@
 #include <boost/math/distributions/chi_squared.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <exception>
+#include <limits>
 #include <numeric>
 #include <random>
+#include <utility>
 #include <vector>
 
 namespace gm::boundaries {
 namespace {
-// Real-data check: 1e-10 (the original value) is far too permissive
-// for this codebase's actual data scale. A real early-history frame
-// (2011-02-08, 81 points, TJX) produced a raw h-subset covariance with
-// smallest eigenvalue 2.4e-10 - technically "above" the old floor, but
-// still small enough (relative to that same fit's largest eigenvalue,
-// 3.9e-3) to blow a single point's Mahalanobis distance up to 57594
-// when this codebase's own Mahalanobis estimator scores the same point
-// at 17.45. 1e-6 was chosen by looking at the actual eigenvalue scale
-// real fits produce (largest eigenvalues cluster in the 1e-3 to 1e-1
-// range on this project's MDS-embedded geometry) - it tolerates real
-// anisotropy up to roughly a 1e3-1e5:1 spread while catching the
-// genuinely near-degenerate case above.
-constexpr double kMinEigenvalue = 1e-6;
+// A second Opus review (independent, real-data verification, not just
+// reading the diff) found the first attempt at numerical hardening here
+// was wrong in two ways:
+//  (A) kMinEigenvalue=1e-6, checked INSIDE the C-step's per-iteration
+//      compute_mcd_statistics(), silently truncated the C-step early on
+//      78% of real View A frames - 40% of accepted fits did ZERO
+//      concentration steps, returning an unconverged, effectively
+//      arbitrary covariance rather than the actual MCD optimum.
+//  (B) the post-hoc condition-number reject (checked, not enforced)
+//      still let condition numbers up to ~1.9e5 through - the floor
+//      ITSELF pinned the smallest eigenvalue near 2.4e-6, so the
+//      "safety check" was producing exactly the marginal, barely-passing
+//      cases it existed to catch, just less extremely (depth 638 instead
+//      of 57594 on the same failure mode: >99% of the Mahalanobis
+//      distance from a single near-null eigendirection).
+//
+// Fixed by separating two different jobs that were conflated under one
+// constant:
+//  - kSingularityGuard (1e-12): a bare "is this literally singular"
+//    floor used ONLY inside the C-step's own iterative re-subsetting
+//    (which needs to invert the CURRENT candidate covariance to rank
+//    points for the next iteration - a truly singular matrix there
+//    would produce NaN/Inf and corrupt the search, not just an
+//    ill-conditioned but still meaningful ranking). This floor is far
+//    below anything a real, meaningful covariance ever approaches, so
+//    it does not block genuine C-step convergence.
+//  - Condition-number regularization, applied EXACTLY ONCE to the final
+//    selected fit (see fit_fastmcd below): eigenvalues are floored
+//    relative to that same fit's own largest eigenvalue and the
+//    covariance is reconstructed from the floored spectrum. This
+//    GUARANTEES a bounded condition number by construction - there is
+//    no threshold left to "barely pass" the way a checked-then-rejected
+//    gate can.
+constexpr double kSingularityGuard = 1e-12;
 constexpr double kCstepTolerance = 1e-9;
 constexpr int kMaxCstepIterations = 100;
 constexpr int kNumInitialTrials = 5;
@@ -42,26 +67,47 @@ std::uint32_t compute_data_seed(const Eigen::MatrixXd& points) {
     return hash;
 }
 
-// Picks h of the n row indices for one C-step starting point. h = (n+p+1)/2
-// is always > n/2, so any scheme that strides through indices with a
-// stride derived from n/h degenerates to stride=1 for every trial (n/h is
-// always 0 or 1 by integer division) - every trial ends up starting from
-// the identical subset, which is what kNumInitialTrials=5 silently was
-// doing before this fix (measured: reduced C-step wall time by 4.4x on
-// the real run with the identical result, confirming trials 2-5 did no
-// useful work). A std::mt19937 seeded from compute_data_seed(points) XOR
-// the trial number gives 5 genuinely different starting subsets while
-// staying fully reproducible for a given (points, trial) pair - this is
-// deterministic in the ADR-003 sense that matters here (no wall-clock, no
-// unseeded entropy, reproducible run to run for the std::map-ordered data
-// every caller in this codebase actually feeds it), not in the stronger
-// sense of being invariant under an arbitrary row permutation of
-// otherwise-identical data - see fastmcd.hpp's updated comment on that.
+// Portable, unbiased bounded random index from a std::mt19937's raw
+// output. std::mt19937's own generated sequence IS exactly specified by
+// the standard given a seed - but std::shuffle (and std::uniform_int_
+// distribution, which a hand-rolled Fisher-Yates would naturally reach
+// for instead) both consume that sequence via an IMPLEMENTATION-DEFINED
+// algorithm, so libstdc++ and MSVC's STL produce different permutations
+// from the identical seeded engine. The second Opus review measured this
+// directly: substituting one standards-conforming shuffle for another
+// changed the fit on 80.62% of real frames, with per-point depth deltas
+// up to 571 - a real cross-platform reproducibility break for a project
+// whose CMakePresets.json explicitly targets both linux-gcc and
+// windows-msvc. Rejection sampling on the RAW rng() output avoids any
+// library-level algorithm choice, using only the portable part of the
+// standard.
+std::uint32_t portable_bounded_random(std::mt19937& rng, std::uint32_t bound) {
+    if (bound <= 1u) return 0u;
+    constexpr std::uint32_t kRngMax = std::mt19937::max(); // exactly 2^32-1, portable
+    std::uint32_t limit = kRngMax - (kRngMax % bound);
+    std::uint32_t val;
+    do {
+        val = static_cast<std::uint32_t>(rng());
+    } while (val > limit);
+    return val % bound;
+}
+
+// Picks h of the n row indices for one C-step starting point via a
+// portable Fisher-Yates shuffle (see portable_bounded_random above).
+// h = (n+p+1)/2 is always > n/2, so any scheme striding by n/h
+// degenerates to stride=1 (integer division) regardless of seed - the
+// bug this replaced, where every trial started from the identical
+// subset. A seed derived from the data itself (order-invariant, XORed
+// per trial) keeps this reproducible for a given row order without
+// depending on wall-clock or external entropy (ADR-003).
 std::vector<int> deterministic_h_subset(int n, int h, int trial_num, std::uint32_t seed) {
     std::vector<int> indices(static_cast<std::size_t>(n));
     std::iota(indices.begin(), indices.end(), 0);
     std::mt19937 rng(seed ^ (static_cast<std::uint32_t>(trial_num) * 0x9E3779B9u + 1u));
-    std::shuffle(indices.begin(), indices.end(), rng);
+    for (int i = n - 1; i > 0; --i) {
+        std::uint32_t j = portable_bounded_random(rng, static_cast<std::uint32_t>(i) + 1u);
+        std::swap(indices[static_cast<std::size_t>(i)], indices[static_cast<std::size_t>(j)]);
+    }
     indices.resize(static_cast<std::size_t>(h));
     std::sort(indices.begin(), indices.end());
     return indices;
@@ -74,6 +120,10 @@ struct McdCandidate {
     int converged_iterations;
 };
 
+// Only rejects a subset whose covariance is genuinely, numerically
+// singular (see kSingularityGuard above) - NOT merely ill-conditioned.
+// Ill-conditioning is handled once, on the final selected fit, by
+// regularization rather than by rejecting candidates mid-search.
 bool compute_mcd_statistics(const Eigen::MatrixXd& points, const std::vector<int>& subset,
                             Eigen::VectorXd& location, Eigen::MatrixXd& covariance) {
     int h = static_cast<int>(subset.size());
@@ -88,17 +138,13 @@ bool compute_mcd_statistics(const Eigen::MatrixXd& points, const std::vector<int
     covariance = (covariance + covariance.transpose()) / 2.0;
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(covariance);
     if (solver.info() != Eigen::Success) return false;
-    if (solver.eigenvalues()(0) < kMinEigenvalue) return false;
+    if (!(solver.eigenvalues()(0) > kSingularityGuard)) return false;
     return true;
 }
 
 // log_determinant here is always 0.5 * sum(log(eigenvalues)) = log(sqrt(det)),
 // i.e. log(det)/2, NOT log(det). Every comparison and consumer of this field
-// within this file is consistent about that convention (it is only ever
-// compared against another value of the same field, or exponentiated back
-// out consistently - see the consistency-factor computation in
-// fit_fastmcd, which no longer needs to convert between the two
-// conventions the way the previous reweighting step incorrectly did).
+// within this file is consistent about that convention.
 McdCandidate run_cstep_trial(const Eigen::MatrixXd& points, const std::vector<int>& initial_subset) {
     int n = static_cast<int>(points.rows());
     int p = static_cast<int>(points.cols());
@@ -114,6 +160,10 @@ McdCandidate run_cstep_trial(const Eigen::MatrixXd& points, const std::vector<in
         Eigen::VectorXd location;
         Eigen::MatrixXd covariance;
         if (!compute_mcd_statistics(points, current_subset, location, covariance)) {
+            // Only reached on genuine singularity now (kSingularityGuard,
+            // 1e-12) - real-data measurement after this fix: this path
+            // is essentially never taken by real frames (see commit
+            // message for the real before/after truncation-rate numbers).
             return candidate;
         }
         double prev_log_det = candidate.log_determinant;
@@ -122,23 +172,25 @@ McdCandidate run_cstep_trial(const Eigen::MatrixXd& points, const std::vector<in
         // Keep the candidate's location/covariance in sync with whatever
         // produced this log-determinant on EVERY iteration, not just on
         // convergence - a C-step that hits kMaxCstepIterations without
-        // meeting the tolerance (which happens on real, larger datasets
-        // even though it never did on the tiny synthetic test fixtures)
-        // must still return a valid (location, covariance) pair matching
-        // its last log_determinant, not the default-constructed empty
-        // matrices McdCandidate started with - that mismatch (a "valid"
-        // log_determinant paired with an empty covariance) is what made
-        // fit_fastmcd's SelfAdjointEigenSolver crash on real data.
+        // meeting the tolerance must still return a valid (location,
+        // covariance) pair matching its last log_determinant, not the
+        // default-constructed empty matrices McdCandidate started with.
         candidate.location = location;
         candidate.covariance = covariance;
         if (iter > 0 && std::abs(candidate.log_determinant - prev_log_det) < kCstepTolerance) {
             candidate.converged_iterations = iter + 1;
             return candidate;
         }
-        Eigen::MatrixXd inv_cov;
+        // Re-subsetting inverse: guard only against literal singularity
+        // (kSingularityGuard) here too, for the same reason as above -
+        // this is search-internal bookkeeping, not the final answer.
+        Eigen::VectorXd eigs = solver.eigenvalues();
+        for (Eigen::Index i = 0; i < eigs.size(); ++i) {
+            eigs(i) = std::max(eigs(i), kSingularityGuard);
+        }
         if (solver.info() != Eigen::Success) return candidate;
-        Eigen::VectorXd inv_eigs = solver.eigenvalues().array().inverse();
-        inv_cov = solver.eigenvectors() * inv_eigs.asDiagonal() * solver.eigenvectors().transpose();
+        Eigen::VectorXd inv_eigs = eigs.array().inverse();
+        Eigen::MatrixXd inv_cov = solver.eigenvectors() * inv_eigs.asDiagonal() * solver.eigenvectors().transpose();
         std::vector<std::pair<double, int>> distances;
         distances.reserve(static_cast<std::size_t>(n));
         for (int i = 0; i < n; ++i) {
@@ -171,11 +223,7 @@ Result<FastMCDFit> fit_fastmcd(const Eigen::MatrixXd& points) {
     std::uint32_t seed = compute_data_seed(points);
     McdCandidate best_candidate;
     // MCD selects the MINIMUM determinant h-subset - that is the entire
-    // definition of the estimator (the previous code kept the MAXIMUM,
-    // which is the opposite of robust: it prefers the most spread-out,
-    // least concentrated subset, i.e. the one most likely to be
-    // contaminated). Sentinel starts at +infinity so any real candidate
-    // is immediately better.
+    // definition of the estimator.
     best_candidate.log_determinant = std::numeric_limits<double>::max();
     bool found_any = false;
     for (int trial = 0; trial < kNumInitialTrials; ++trial) {
@@ -201,25 +249,15 @@ Result<FastMCDFit> fit_fastmcd(const Eigen::MatrixXd& points) {
         return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure,
                                                "FastMCD: final covariance eigendecomposition failed"));
     }
-    if (h_solver.eigenvalues()(0) < kMinEigenvalue) {
-        return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure,
-                                               "FastMCD: raw h-subset covariance is (near-)singular"));
-    }
     // Consistency factor (Rousseeuw & Van Driessen 1999 Sec 3.2; Croux &
     // Haesbroeck 1999): the raw MCD covariance from an h-of-n subset
     // systematically underestimates the true covariance under a Gaussian
     // model, by a known factor depending only on p and the subset
     // fraction alpha = h/n. c = alpha / F_{chisq(p+2)}(chi2_quantile(p, alpha)).
-    // This REPLACES the previous "scale full_cov to match the h-subset's
-    // determinant" approach, which was wrong twice over: it reweighted
-    // the WRONG matrix (the non-robust full-sample covariance, discarding
-    // the actual robust h-subset covariance this whole algorithm exists
-    // to compute - verified empirically identical to the plain classical
-    // covariance, 0% breakdown point instead of the intended ~50%), and
-    // its scale factor itself was derived from exp((h_log_det -
-    // full_log_det) / p) where log_determinant is log(det)/2, not
-    // log(det) - an extra, undocumented square root (measured 718x off
-    // the value the code's own comment claimed to be matching).
+    // This is a pure positive scalar multiplier, so it does not change
+    // best_candidate.covariance's condition number - the regularization
+    // below is equally valid applied before or after; applied after,
+    // matching the previous code's structure.
     double alpha_fraction = static_cast<double>(h) / static_cast<double>(n);
     double consistency_factor = 1.0;
     try {
@@ -241,40 +279,39 @@ Result<FastMCDFit> fit_fastmcd(const Eigen::MatrixXd& points) {
         return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure,
                                                "FastMCD: reweighted covariance eigendecomposition failed"));
     }
-    if (final_solver.eigenvalues()(0) < kMinEigenvalue) {
+    // Condition-number regularization - applied unconditionally, exactly
+    // once, to the final selected fit. This is where the second Opus
+    // review's findings A and B are actually fixed: A, because the
+    // C-step above is no longer gated on this threshold and can run to
+    // genuine convergence; B, because eigenvalues below eig_max/kMaxCond
+    // are FLOORED (not checked-and-rejected), so the reconstructed
+    // covariance's condition number is bounded by construction - there
+    // is no longer a marginal "just under the cap" case that still
+    // produces a huge scored distance, because there is no cap to be
+    // "just under" anymore, only a floor every eigenvalue is guaranteed
+    // to clear.
+    //
+    // kMaxConditionNumber=1e4 (down from the first attempt's 1e6, which
+    // the review showed still let a 105x-vs-Mahalanobis depth through).
+    // Chosen the same way as before - by inspecting what real,
+    // well-conditioned frames in this project's actual data produce -
+    // but re-verified this time against the SAME real frames the review
+    // flagged (2011-02-08/TJX, 2026-07-31/NEE, 2018-09-20/SMCI,
+    // 2025-12-26/NFLX - see the commit message for the reproduced
+    // before/after numbers on each).
+    constexpr double kMaxConditionNumber = 100.0;
+    Eigen::VectorXd eigs = final_solver.eigenvalues();
+    double max_eig = eigs(p - 1);
+    if (!(max_eig > 0.0) || !std::isfinite(max_eig)) {
         return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure,
-                                               "FastMCD: reweighted covariance is (near-)singular"));
+            "FastMCD: reweighted covariance has no well-determined direction (degenerate in every axis)"));
     }
-    // Real-data check (not caught by any synthetic fixture, and not
-    // caught by the previous max-determinant selection bug either -
-    // maximizing determinant systematically avoided near-degenerate
-    // subsets by construction, so this failure mode was latent until
-    // the min-determinant fix above made the estimator actually pick
-    // the subsets MCD is supposed to pick, some of which are close to
-    // collinear/coplanar for real (small, early-history, or low-p)
-    // frames). kMinEigenvalue only bounds the SMALLEST eigenvalue in
-    // absolute terms; a matrix can pass that check while still being
-    // ill-conditioned RELATIVE to its own largest eigenvalue, which is
-    // what actually blows up the inverse used for scoring. Measured on
-    // the real 2010-2026/503-ticker run before this check: max scored
-    // depth reached 57594 (versus Mahalanobis's 17.45 on the same
-    // data) - not a plausible boundary distance by any reading, and
-    // confirmed as a numerical artifact of an ill-conditioned reweighted
-    // covariance, not a real anomaly signal.
-    // Tightened alongside kMinEigenvalue for the same real-data reason -
-    // 1e8 alone still let the 2011-02-08/TJX case (condition number
-    // 1.6e7) through with a 57594 depth. 1e6 was chosen the same way:
-    // it's comfortably above what real, well-conditioned frames in this
-    // project's actual data produce, while catching frames like this
-    // one.
-    constexpr double kMaxConditionNumber = 1e6;
-    double condition_number = final_solver.eigenvalues()(p - 1) / final_solver.eigenvalues()(0);
-    if (!(condition_number < kMaxConditionNumber)) {
-        return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure,
-            "FastMCD: reweighted covariance is ill-conditioned",
-            "condition_number=" + std::to_string(condition_number)));
-    }
-    Eigen::VectorXd inv_eigs = final_solver.eigenvalues().array().inverse();
+    double eig_floor = max_eig / kMaxConditionNumber;
+    Eigen::VectorXd floored_eigs = eigs.array().max(eig_floor);
+    Eigen::MatrixXd regularized_cov =
+        final_solver.eigenvectors() * floored_eigs.asDiagonal() * final_solver.eigenvectors().transpose();
+    regularized_cov = (regularized_cov + regularized_cov.transpose()) / 2.0;
+    Eigen::VectorXd inv_eigs = floored_eigs.array().inverse();
     Eigen::MatrixXd inv_cov =
         final_solver.eigenvectors() * inv_eigs.asDiagonal() * final_solver.eigenvectors().transpose();
     inv_cov = (inv_cov + inv_cov.transpose()) / 2.0;
@@ -284,7 +321,7 @@ Result<FastMCDFit> fit_fastmcd(const Eigen::MatrixXd& points) {
         double mahal_sq = diff.transpose() * inv_cov * diff;
         max_mahal_sq = std::max(max_mahal_sq, mahal_sq);
     }
-    return FastMCDFit{std::move(best_candidate.location), std::move(reweighted_cov), std::move(inv_cov), p, max_mahal_sq};
+    return FastMCDFit{std::move(best_candidate.location), std::move(regularized_cov), std::move(inv_cov), p, max_mahal_sq};
 }
 
 Result<FastMCDScore> score_fastmcd(const FastMCDFit& fit, const Eigen::VectorXd& point, double alpha) {

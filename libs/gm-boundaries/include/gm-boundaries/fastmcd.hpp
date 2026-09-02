@@ -4,7 +4,7 @@
 //
 // Implements Rousseeuw & Van Driessen (1999): "A fast algorithm for the
 // minimum covariance determinant estimator" - finds the h-subset of n points
-// (where h = ceil((n+p+1)/2)) whose covariance matrix has the smallest
+// (where h = floor((n+p+1)/2), C++ integer division) whose covariance matrix has the smallest
 // determinant, yielding a robust location/covariance estimate resistant to
 // ~50% contamination.
 //

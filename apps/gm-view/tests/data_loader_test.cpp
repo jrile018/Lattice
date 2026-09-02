@@ -44,9 +44,22 @@ std::filesystem::path test_run_dir() {
     return here / ".." / ".." / ".." / "runs" / "m6-review";
 }
 
+// A real-data audit found these tests hard-fail (10/10) on a fresh
+// clone: runs/ is entirely gitignored and nothing provisions
+// runs/m6-review, so REQUIRE(result) fails immediately with no
+// explanation. Every test now checks this first and SKIPs (not FAILs)
+// when the fixture isn't there - a missing optional local fixture is
+// not the same claim as "the code under test is broken", and a
+// fresh-clone CI run should say so rather than reporting 10 failures.
+bool test_fixture_available() {
+    std::error_code ec;
+    return std::filesystem::exists(test_run_dir(), ec) && !ec;
+}
+
 }  // namespace
 
 TEST_CASE("load_run loads all data structures from real run directory", "[data_loader]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     auto result = load_run(test_run_dir());
     REQUIRE(result);
     
@@ -60,6 +73,7 @@ TEST_CASE("load_run loads all data structures from real run directory", "[data_l
 }
 
 TEST_CASE("load_run loads ticker metadata from universe.parquet", "[data_loader]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     auto result = load_run(test_run_dir());
     REQUIRE(result);
     
@@ -76,6 +90,7 @@ TEST_CASE("load_run loads ticker metadata from universe.parquet", "[data_loader]
 }
 
 TEST_CASE("load_run loads scores from scores.parquet", "[data_loader]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     auto result = load_run(test_run_dir());
     REQUIRE(result);
     
@@ -109,6 +124,7 @@ TEST_CASE("load_run loads scores from scores.parquet", "[data_loader]") {
 }
 
 TEST_CASE("load_run loads spreads from spreads.parquet", "[data_loader]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     auto result = load_run(test_run_dir());
     REQUIRE(result);
     
@@ -123,6 +139,7 @@ TEST_CASE("load_run loads spreads from spreads.parquet", "[data_loader]") {
 }
 
 TEST_CASE("load_run loads baskets from baskets.parquet", "[data_loader]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     auto result = load_run(test_run_dir());
     REQUIRE(result);
     
@@ -138,6 +155,7 @@ TEST_CASE("load_run loads baskets from baskets.parquet", "[data_loader]") {
 }
 
 TEST_CASE("load_run loads excursions from excursions.parquet", "[data_loader]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     auto result = load_run(test_run_dir());
     REQUIRE(result);
     
@@ -154,6 +172,7 @@ TEST_CASE("load_run loads excursions from excursions.parquet", "[data_loader]") 
 }
 
 TEST_CASE("geometry frame data can be associated with metadata", "[data_loader]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     auto result = load_run(test_run_dir());
     REQUIRE(result);
 
@@ -166,6 +185,7 @@ TEST_CASE("geometry frame data can be associated with metadata", "[data_loader]"
 }
 
 TEST_CASE("load_run builds ticker/date indices matching the raw vectors", "[data_loader]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     auto result = load_run(test_run_dir());
     REQUIRE(result);
 
@@ -184,6 +204,7 @@ TEST_CASE("load_run builds ticker/date indices matching the raw vectors", "[data
 }
 
 TEST_CASE("Learn panel ticker/date lookup: indexed vs linear scan on real M6 data", "[data_loader][performance]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     // Reproduces the Learn panel's per-frame cost before/after the
     // scores_by_ticker_date/baskets_by_ticker_date indices: a linear
     // scan of every loaded scores/baskets row (what
@@ -254,6 +275,7 @@ TEST_CASE("Learn panel ticker/date lookup: indexed vs linear scan on real M6 dat
 }
 
 TEST_CASE("load_run loads meta/profiles.json when present", "[data_loader]") {
+    if (!test_fixture_available()) { SKIP("real run fixture not provisioned - set GM_VIEW_TEST_RUN_DIR or provision runs/m6-review"); }
     auto result = load_run(test_run_dir());
     REQUIRE(result);
 

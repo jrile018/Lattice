@@ -55,7 +55,7 @@ struct AppState {
     bool show_sectors = false;
     bool show_learn_panel = false;
     std::string learn_panel_ticker;
-    // ticker -> distinct RGBA color, one entry per real GICS sector
+    // sector -> distinct RGBA color, one entry per real GICS sector
     // present in the loaded run (see assign_sector_colors below).
     // Rebuilt once per run load, not derived per-point every frame.
     std::map<std::string, std::uint32_t> sector_colors;
