@@ -250,14 +250,39 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     auto edges = gm::io::read_parquet(geometry_dir / "edges.parquet");
     if (!edges) return tl::unexpected(edges.error());
 
-    // ADR-012: Read regime.parquet to get tear_flag veto per date
+    // ADR-012: Read regime.parquet to get tear_flag per date. gm-signals
+    // does NOT act on this veto itself - it TAGS every spreads.parquet row
+    // with the tear_flag of its date and writes every row it computes,
+    // full stop. Actually rejecting a tear-day candidate from trading is
+    // gm-backtest's job (apps/gm-backtest/main.cpp, alongside View A's and
+    // View B's vetoes, into its own rejected_tear_veto counter), for two
+    // reasons found the hard way on the real 16-year run:
+    //   1. Dropping rows HERE desynced spreads.parquet/baskets.parquet
+    //      from excursions.parquet (excursion detection below runs over
+    //      the FULL z-score series, tear days included, since a tear day
+    //      is real out-of-sample data about whether the spread reverted -
+    //      not a reason to pretend the observation never happened). An
+    //      excursion starting on a tear day would then find no matching
+    //      spreads.parquet row downstream, and gm-backtest's
+    //      rejected_no_spread_data counter - documented as catching a
+    //      genuine cross-stage inconsistency, not an expected data gap -
+    //      silently absorbed 819/7376 (11.1%) of all excursions as if
+    //      they were data corruption, when they were a deliberate policy
+    //      decision. See git history / ADR.md for the postmortem.
+    //   2. ADR-012 vetoes "views B and C" trading signals, i.e. a trading
+    //      decision - the same kind of decision View A's structural-change
+    //      veto and View B's outside-boundary check already are, and both
+    //      of those are enforced in gm-backtest, not here. Tagging here
+    //      and enforcing there keeps all four ADR §6.5 entry vetoes in one
+    //      place with one counter each, and keeps this stage's own output
+    //      a straightforward "here is what the data says" artifact.
     auto regime = gm::io::read_parquet(geometry_dir / "regime.parquet");
     if (!regime) return tl::unexpected(regime.error());
     auto regime_dates_col = regime->string_column("date");
     if (!regime_dates_col) return tl::unexpected(regime_dates_col.error());
     auto tear_flag_col = regime->bool_column("tear_flag");
     if (!tear_flag_col) return tl::unexpected(tear_flag_col.error());
-    
+
     // Build date -> tear_flag map for O(log n) lookup
     std::map<std::string, bool> tear_flag_by_date;
     for (std::size_t i = 0; i < regime_dates_col->size(); ++i) {
@@ -284,6 +309,7 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     std::vector<std::string> out_dates, out_tickers;
     std::vector<double> out_z, out_spread, out_half_life;
     std::vector<std::int64_t> out_n_neighbors;
+    std::vector<std::uint8_t> out_tear_flag;
 
     // Per (date,ticker), one row per basket neighbour: the ENTRY-DAY
     // weights a downstream consumer (gm-backtest) needs to reconstruct
@@ -309,6 +335,13 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     std::map<std::string, std::vector<double>> zscore_series_by_ticker;
 
     std::int64_t rows_skipped_incomplete = 0;
+    // ADR-012: count of computed rows whose date is tear-flagged - a
+    // visible, attributable record of the veto's reach at this stage.
+    // Not a rejection count (gm-backtest's rejected_tear_veto is the
+    // trading-relevant one, since it only counts EXCURSION-START-day tear
+    // flags); this is the broader "how much of the raw signal surface did
+    // ADR-012 touch" figure.
+    std::int64_t rows_tear_flagged = 0;
 
     for (const auto& ticker : *active_universe) {
         auto price_it = log_prices->find(ticker);
@@ -349,24 +382,26 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
                 continue;
             }
 
-            // ADR-012: Apply tear_flag veto - skip signals when topology is unstable
+            // ADR-012: TAG this row with its date's tear_flag - do not drop
+            // it. See the tear_flag_by_date comment above for why the
+            // actual trading veto is enforced in gm-backtest instead.
             auto tear_it = tear_flag_by_date.find(row->date);
-            bool skip_signal = (tear_it != tear_flag_by_date.end() && tear_it->second);
-            
-            if (!skip_signal) {
-                out_dates.push_back(row->date);
-                out_tickers.push_back(row->ticker);
-                out_z.push_back(row->z);
-                out_spread.push_back(row->spread);
-                out_half_life.push_back(row->half_life);
-                out_n_neighbors.push_back(row->n_neighbors);
+            bool tear = (tear_it != tear_flag_by_date.end() && tear_it->second);
+            if (tear) ++rows_tear_flagged;
 
-                for (std::size_t j = 0; j < row->neighbor_tickers.size(); ++j) {
-                    basket_dates.push_back(row->date);
-                    basket_tickers.push_back(row->ticker);
-                    basket_neighbor_tickers.push_back(row->neighbor_tickers[j]);
-                    basket_weights.push_back(row->neighbor_weights[j]);
-                }
+            out_dates.push_back(row->date);
+            out_tickers.push_back(row->ticker);
+            out_z.push_back(row->z);
+            out_spread.push_back(row->spread);
+            out_half_life.push_back(row->half_life);
+            out_n_neighbors.push_back(row->n_neighbors);
+            out_tear_flag.push_back(tear ? 1 : 0);
+
+            for (std::size_t j = 0; j < row->neighbor_tickers.size(); ++j) {
+                basket_dates.push_back(row->date);
+                basket_tickers.push_back(row->ticker);
+                basket_neighbor_tickers.push_back(row->neighbor_tickers[j]);
+                basket_weights.push_back(row->neighbor_weights[j]);
             }
 
             zscore_dates_by_ticker[ticker].push_back(row->date);
@@ -384,6 +419,13 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     if (auto r = spreads_table.add_double_column("half_life", std::move(out_half_life)); !r)
         return tl::unexpected(r.error());
     if (auto r = spreads_table.add_int64_column("n_neighbors", std::move(out_n_neighbors)); !r)
+        return tl::unexpected(r.error());
+    // ADR-012: this date's tear_flag (gm-geometry's regime.parquet),
+    // carried through so gm-backtest can enforce the veto itself (see the
+    // tear_flag_by_date comment above) without re-reading regime.parquet
+    // and without any row here ever going missing relative to
+    // excursions.parquet's z-score-derived rows.
+    if (auto r = spreads_table.add_bool_column("tear_flag", std::move(out_tear_flag)); !r)
         return tl::unexpected(r.error());
 
     auto write1 = gm::io::write_parquet(spreads_table, output_dir / "spreads.parquet");
@@ -447,6 +489,7 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     manifest.set_int("rows_written", static_cast<std::int64_t>(spreads_table.num_rows()));
     manifest.set_int("basket_rows_written", static_cast<std::int64_t>(baskets_table.num_rows()));
     manifest.set_int("rows_skipped_incomplete", rows_skipped_incomplete);
+    manifest.set_int("rows_tear_flagged", rows_tear_flagged);
     manifest.set_int("excursions_written", static_cast<std::int64_t>(excursions_table.num_rows()));
     manifest.set_int("spread_fit_window_days", window);
     manifest.set_double("ridge_lambda", ridge_lambda);
