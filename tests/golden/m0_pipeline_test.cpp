@@ -34,9 +34,9 @@
 
 namespace {
 
-constexpr std::array<const char*, 8> kExpectedStages = {
-    "gm-universe", "gm-ingest",   "gm-features",  "gm-geometry",
-    "gm-boundaries", "gm-signals", "gm-backtest", "gm-report",
+constexpr std::array<const char*, 9> kExpectedStages = {
+    "gm-universe", "gm-ingest",     "gm-features", "gm-geometry",   "gm-boundaries",
+    "gm-signals",  "gm-backtest",   "gm-profiles", "gm-report",
 };
 
 // gm-universe/gm-ingest (M1), gm-geometry (M2), gm-boundaries/
@@ -121,6 +121,12 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
             } else if (std::string_view{stage} == "gm-report") {
                 CHECK(std::filesystem::exists(run_dir / stage / "excursions_tagged.parquet"));
                 CHECK(std::filesystem::exists(run_dir / stage / "reversion_study.json"));
+            } else if (std::string_view{stage} == "gm-profiles") {
+                // ADR §8.2: meta/profiles.json is a sibling of every
+                // stage's own output_dir (run_dir/gm-<stage>/), not
+                // nested inside gm-profiles' own output_dir - so this
+                // checks run_dir/"meta", not run_dir/stage.
+                CHECK(std::filesystem::exists(run_dir / "meta" / "profiles.json"));
             } else {
                 std::filesystem::path stub_artifact =
                     run_dir / stage / (std::string{stage} + ".stub.json");

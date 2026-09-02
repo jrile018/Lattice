@@ -24,7 +24,7 @@ target_link_libraries(gm-golden-tests
 # hint, since the test shells out to the gm-run executable by path.
 add_dependencies(gm-golden-tests
   gm-run gm-universe gm-ingest gm-features gm-geometry gm-boundaries
-  gm-signals gm-backtest gm-report
+  gm-signals gm-backtest gm-profiles gm-report
 )
 
 target_compile_definitions(gm-golden-tests PRIVATE
