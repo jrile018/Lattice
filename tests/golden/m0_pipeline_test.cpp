@@ -15,11 +15,17 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <nlohmann/json.hpp>
+
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <set>
 #include <sstream>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #if !defined(_WIN32)
 #include <sys/wait.h>
@@ -214,6 +220,76 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
         CHECK(has_view_b);
         CHECK(has_mahalanobis);
         CHECK(has_kde);
+    }
+
+    SECTION("ADR-012: gm-signals' spreads.parquet stays consistent with excursions.parquet, and "
+            "gm-backtest's rejected_no_spread_data stays a genuine cross-stage-integrity signal") {
+        // Regression test for the M6 audit finding: the tear-flag veto
+        // used to DROP rows from spreads.parquet/baskets.parquet while
+        // excursions.parquet (built from the full, unfiltered z-score
+        // series) kept every excursion - so an excursion starting on a
+        // tear day had no matching spreads.parquet row, and gm-backtest
+        // silently miscounted it into rejected_no_spread_data (a counter
+        // whose own code comment defines it as "a real cross-stage
+        // inconsistency, not an expected data gap"). The fix tags rows
+        // with tear_flag instead of dropping them; gm-backtest now vetoes
+        // on that flag into its own rejected_tear_veto counter. This test
+        // asserts the invariant that made the old behaviour a bug: every
+        // excursion's (ticker, start_date) must have a corresponding
+        // spreads.parquet row, unconditionally - whether or not that row
+        // happens to be tear-flagged, and whether or not this small
+        // fixture's window ever actually produces a tear day.
+        auto spreads = gm::io::read_parquet(run_dir / "gm-signals" / "spreads.parquet");
+        REQUIRE(spreads.has_value());
+        auto spread_tickers = spreads->string_column("ticker");
+        auto spread_dates = spreads->string_column("date");
+        REQUIRE(spread_tickers.has_value());
+        REQUIRE(spread_dates.has_value());
+        // Schema check: the tear_flag column exists at all (would fail to
+        // compile/parse if gm-signals reverted to not writing it).
+        auto tear_flags = spreads->bool_column("tear_flag");
+        REQUIRE(tear_flags.has_value());
+        REQUIRE(tear_flags->size() == spread_tickers->size());
+
+        std::set<std::pair<std::string, std::string>> spread_keys;
+        for (std::size_t i = 0; i < spread_tickers->size(); ++i) {
+            spread_keys.emplace((*spread_tickers)[i], (*spread_dates)[i]);
+        }
+
+        auto excursions = gm::io::read_parquet(run_dir / "gm-signals" / "excursions.parquet");
+        REQUIRE(excursions.has_value());
+        auto exc_tickers = excursions->string_column("ticker");
+        auto exc_start_dates = excursions->string_column("start_date");
+        REQUIRE(exc_tickers.has_value());
+        REQUIRE(exc_start_dates.has_value());
+        REQUIRE(exc_tickers->size() > 0); // the fixture must actually produce excursions to test this
+
+        std::size_t missing = 0;
+        for (std::size_t i = 0; i < exc_tickers->size(); ++i) {
+            if (spread_keys.count({(*exc_tickers)[i], (*exc_start_dates)[i]}) == 0) ++missing;
+        }
+        CHECK(missing == 0);
+
+        std::ifstream results_in(run_dir / "gm-backtest" / "backtest_results.json", std::ios::binary);
+        REQUIRE(results_in);
+        nlohmann::json results;
+        results_in >> results;
+
+        REQUIRE(results.contains("rejected_no_spread_data"));
+        REQUIRE(results.contains("rejected_tear_veto"));
+        // The direct consequence of the invariant checked above: with
+        // every excursion's entry row present in spreads.parquet,
+        // rejected_no_spread_data has nothing left to catch on a clean
+        // fixture run - it is a genuine 0, not a veto miscounted as
+        // corruption.
+        CHECK(results["rejected_no_spread_data"].get<std::int64_t>() == 0);
+        // rejected_tear_veto is allowed to be 0 here (this fixture's
+        // ~21-trading-day window may or may not produce a real topology
+        // tear) - its purpose in this test is only to confirm the counter
+        // exists and is separate from rejected_no_spread_data. The real
+        // 16-year run (runs/m1-full-2010-2026/) is where a nonzero value
+        // is actually expected and was verified during the M6 fix.
+        CHECK(results["rejected_tear_veto"].get<std::int64_t>() >= 0);
     }
 
     std::filesystem::remove_all(run_dir);

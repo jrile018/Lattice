@@ -50,3 +50,22 @@ embedding_dims = 3
 # to guarantee multiple real View B points against this fixture.
 alpha = 0.05
 view_b_lookback_days = 3
+
+[signals]
+# gm-signals' own default spread_fit_window_days (60, config/params.toml)
+# needs more trading days than this fixture's ~21 have at all - shrunk
+# the same way [geometry].window_days and [boundaries].view_b_lookback_days
+# already were, so gm-signals actually computes real spreads/z-scores
+# against this fixture instead of silently skipping every ticker (every
+# ticker's own history was always shorter than the unmodified 60-day
+# default, so spreads.parquet/excursions.parquet existed but held zero
+# rows - the earlier version of this test only checked the files EXIST,
+# never that they held content). z_entry/z_exit are dropped well below
+# the real run's defaults (2.0/0.5) so at least one real z-score
+# crossing episode is essentially guaranteed over 10 real tickers'
+# real January-2024 returns, which tests/golden/m0_pipeline_test.cpp's
+# ADR-012 consistency SECTION needs to be a meaningful (non-vacuous)
+# check.
+spread_fit_window_days = 5
+z_entry = 0.1
+z_exit = 0.05

@@ -7,6 +7,24 @@
 //   1. View C: already satisfied by construction (excursions.parquet
 //      only exists where |z| already crossed z_entry) - PLUS half-life
 //      in the tradable band (min/max_half_life_days), checked here.
+//   1b. ADR-012's topology veto: gm-signals tags every spreads.parquet
+//      row with tear_flag (gm-geometry's regime.parquet, via Ripser
+//      persistent homology) rather than dropping tear-day rows itself -
+//      an excursion whose ENTRY day is tear-flagged is rejected HERE
+//      (rejected_tear_veto), the same place View A's and View B's vetoes
+//      below are enforced, entry-gated only, exactly like those two (a
+//      position already open when a later day tears is not force-closed;
+//      see the tear-veto design note in this file's git history / the
+//      M6 audit for why entry-only is the reading of ADR-012 taken
+//      here). Checked immediately after the spread lookup below since
+//      tear_flag is a property of that same spreads.parquet row - keeping
+//      this separate from rejected_no_spread_data (a DIFFERENT failure
+//      mode: a genuine cross-stage inconsistency where excursions.parquet
+//      references a (ticker, date) gm-signals never computed at all) is
+//      the specific fix for the M6 audit finding: 819 tear-vetoed
+//      candidates were previously miscounted into rejected_no_spread_data,
+//      making a real data-integrity counter permanently nonzero for a
+//      deliberate policy decision instead of an actual bug.
 //   2. View B: outside its own surface (gm-boundaries' scores.parquet,
 //      view="B", the Mahalanobis estimator specifically - ADR-007's
 //      "statistical anchor").
@@ -174,6 +192,9 @@ struct SpreadPoint {
     double spread;
     double half_life;
     int n_neighbors;
+    bool tear_flag; // ADR-012: this date's topology-tear flag, carried
+                     // through from gm-signals' spreads.parquet (which
+                     // gm-geometry's regime.parquet sourced it from).
 };
 
 using SpreadsByTickerDate = std::map<std::string, std::map<std::string, SpreadPoint>>;
@@ -191,11 +212,14 @@ gm::Result<SpreadsByTickerDate> load_spreads(const gm::io::Table& t) {
     if (!half_life_col) return tl::unexpected(half_life_col.error());
     auto n_col = t.int64_column("n_neighbors");
     if (!n_col) return tl::unexpected(n_col.error());
+    auto tear_flag_col = t.bool_column("tear_flag");
+    if (!tear_flag_col) return tl::unexpected(tear_flag_col.error());
 
     SpreadsByTickerDate result;
     for (std::size_t i = 0; i < ticker_col->size(); ++i) {
-        result[(*ticker_col)[i]][(*date_col)[i]] =
-            SpreadPoint{(*z_col)[i], (*spread_col)[i], (*half_life_col)[i], static_cast<int>((*n_col)[i])};
+        result[(*ticker_col)[i]][(*date_col)[i]] = SpreadPoint{(*z_col)[i], (*spread_col)[i], (*half_life_col)[i],
+                                                                 static_cast<int>((*n_col)[i]),
+                                                                 (*tear_flag_col)[i] != 0};
     }
     return result;
 }
@@ -355,6 +379,7 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     }
 
     std::int64_t rejected_no_spread_data = 0;
+    std::int64_t rejected_tear_veto = 0;
     std::int64_t rejected_half_life_band = 0;
     std::int64_t rejected_view_b = 0;
     std::int64_t rejected_view_a_veto = 0;
@@ -376,6 +401,19 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
             continue;
         }
         const SpreadPoint& entry_point = point_it->second;
+
+        // ADR-012: entry-day topology veto - see the file header's "1b"
+        // and gm-signals' tear_flag_by_date comment for the full
+        // rationale. Deliberately its own counter, separate from
+        // rejected_no_spread_data above (a genuine cross-stage
+        // inconsistency, not a policy decision) and checked BEFORE the
+        // other entry conditions since ADR-012 frames a tear as
+        // invalidating the signal itself ("the definition of normal is
+        // actively invalid"), not as one veto among equals.
+        if (entry_point.tear_flag) {
+            ++rejected_tear_veto;
+            continue;
+        }
 
         if (entry_point.half_life < static_cast<double>(min_half_life) ||
             entry_point.half_life > static_cast<double>(max_half_life)) {
@@ -461,6 +499,7 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     results["excursions_total"] = excursions->size();
     results["candidates_eligible"] = candidates.size();
     results["rejected_no_spread_data"] = rejected_no_spread_data;
+    results["rejected_tear_veto"] = rejected_tear_veto;
     results["rejected_half_life_band"] = rejected_half_life_band;
     results["rejected_view_b"] = rejected_view_b;
     results["rejected_view_a_veto"] = rejected_view_a_veto;
