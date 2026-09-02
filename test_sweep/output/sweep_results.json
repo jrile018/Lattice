@@ -1,8 +1,0 @@
-{
-  "grid_axes": [
-    "backtest.cost_bps_per_leg",
-    "signals.z_entry"
-  ],
-  "n_trials": 4,
-  "status": "M5 implementation placeholder"
-}
