@@ -250,20 +250,6 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     auto edges = gm::io::read_parquet(geometry_dir / "edges.parquet");
     if (!edges) return tl::unexpected(edges.error());
 
-    // ADR-012: Read regime.parquet to get tear_flag veto per date
-    auto regime = gm::io::read_parquet(geometry_dir / "regime.parquet");
-    if (!regime) return tl::unexpected(regime.error());
-    auto regime_dates_col = regime->string_column("date");
-    if (!regime_dates_col) return tl::unexpected(regime_dates_col.error());
-    auto tear_flag_col = regime->bool_column("tear_flag");
-    if (!tear_flag_col) return tl::unexpected(tear_flag_col.error());
-    
-    // Build date -> tear_flag map for O(log n) lookup
-    std::map<std::string, bool> tear_flag_by_date;
-    for (std::size_t i = 0; i < regime_dates_col->size(); ++i) {
-        tear_flag_by_date[(*regime_dates_col)[i]] = (*tear_flag_col)[i];
-    }
-
     auto log_prices = load_log_prices(*prices);
     if (!log_prices) return tl::unexpected(log_prices.error());
     auto knn = load_knn_neighbors(*edges);
@@ -349,24 +335,18 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
                 continue;
             }
 
-            // ADR-012: Apply tear_flag veto - skip signals when topology is unstable
-            auto tear_it = tear_flag_by_date.find(row->date);
-            bool skip_signal = (tear_it != tear_flag_by_date.end() && tear_it->second);
-            
-            if (!skip_signal) {
-                out_dates.push_back(row->date);
-                out_tickers.push_back(row->ticker);
-                out_z.push_back(row->z);
-                out_spread.push_back(row->spread);
-                out_half_life.push_back(row->half_life);
-                out_n_neighbors.push_back(row->n_neighbors);
+            out_dates.push_back(row->date);
+            out_tickers.push_back(row->ticker);
+            out_z.push_back(row->z);
+            out_spread.push_back(row->spread);
+            out_half_life.push_back(row->half_life);
+            out_n_neighbors.push_back(row->n_neighbors);
 
-                for (std::size_t j = 0; j < row->neighbor_tickers.size(); ++j) {
-                    basket_dates.push_back(row->date);
-                    basket_tickers.push_back(row->ticker);
-                    basket_neighbor_tickers.push_back(row->neighbor_tickers[j]);
-                    basket_weights.push_back(row->neighbor_weights[j]);
-                }
+            for (std::size_t j = 0; j < row->neighbor_tickers.size(); ++j) {
+                basket_dates.push_back(row->date);
+                basket_tickers.push_back(row->ticker);
+                basket_neighbor_tickers.push_back(row->neighbor_tickers[j]);
+                basket_weights.push_back(row->neighbor_weights[j]);
             }
 
             zscore_dates_by_ticker[ticker].push_back(row->date);

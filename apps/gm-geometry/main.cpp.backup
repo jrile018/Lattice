@@ -21,7 +21,6 @@
 #include <gm-geometry/rmt.hpp>
 #include <gm-geometry/shrinkage.hpp>
 #include <gm-io/parquet.hpp>
-#include <gm-topology/ripser_wrapper.hpp>
 #include <gm-io/table.hpp>
 
 #include <Eigen/Dense>
@@ -29,7 +28,6 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
-#include <numeric>
 #include <set>
 
 namespace {
@@ -270,25 +268,12 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     std::vector<double> out_x, out_y, out_z;
     std::vector<std::string> regime_dates;
     std::vector<double> regime_structural_change;
-    std::vector<double> regime_h0_persistence;
-    std::vector<double> regime_h1_persistence;
-    std::vector<double> regime_wasserstein_distance;
-    std::vector<std::uint8_t> regime_tear_flag;
     std::vector<std::string> edge_dates, edge_ticker_a, edge_ticker_b;
     std::vector<double> edge_distances;
     std::vector<std::uint8_t> edge_in_mst;
     std::vector<std::uint8_t> edge_in_knn;
 
     std::optional<Eigen::MatrixXd> previous_aligned;
-    // Cached separately from previous_aligned (which gets overwritten
-    // to the CURRENT frame's coordinates further down, before the
-    // Wasserstein computation below used to run - comparing a
-    // diagram to itself, which is why wasserstein_distance always
-    // came out exactly 0.0 on real multi-frame data despite passing
-    // every single-frame unit test). This holds the prior frame's
-    // persistence diagram specifically for that comparison, updated
-    // only after this iteration's Wasserstein distance is computed.
-    std::optional<gm::topology::PersistenceFeatures> previous_persistence;
 
     for (Eigen::Index frame_end = window_days - 1; frame_end < total_t; ++frame_end) {
         Eigen::MatrixXd window = panel->returns.block(frame_end - window_days + 1, 0, window_days, n);
@@ -340,47 +325,6 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
         }
         previous_aligned = aligned;
 
-        // ADR-012: Compute H0/H1 persistence and Wasserstein distance
-        gm::topology::PersistenceFeatures current_persistence;
-        auto persist_result = gm::topology::compute_persistence(aligned);
-        if (!persist_result) return tl::unexpected(persist_result.error());
-        current_persistence = *persist_result;
-
-        double h0_persist = current_persistence.h0_total_persistence;
-        double h1_persist = current_persistence.h1_total_persistence;
-
-        // Wasserstein distance from the PRIOR frame's diagram - uses
-        // previous_persistence (still holding last iteration's value at
-        // this point), not previous_aligned (already overwritten to this
-        // frame's coordinates above), and not a redundant second
-        // compute_persistence() call on the same data.
-        double wasserstein_dist = 0.0;
-        if (previous_persistence.has_value()) {
-            auto wd_result = gm::topology::wasserstein_distance(
-                previous_persistence->h0_pairs, current_persistence.h0_pairs);
-            if (wd_result) wasserstein_dist = *wd_result;
-        }
-        previous_persistence = current_persistence;
-
-        // Tear detection: flag if topology changing significantly
-        bool tear_flag = false;
-        if (h1_persist > h0_persist * 0.15) tear_flag = true;
-        if (!regime_wasserstein_distance.empty() && regime_wasserstein_distance.size() > 10) {
-            double mean_wd = std::accumulate(regime_wasserstein_distance.begin(),
-                regime_wasserstein_distance.end(), 0.0) / static_cast<double>(regime_wasserstein_distance.size());
-            double var_wd = 0.0;
-            for (double w : regime_wasserstein_distance)
-                var_wd += (w - mean_wd) * (w - mean_wd);
-            double std_wd = std::sqrt(var_wd / static_cast<double>(regime_wasserstein_distance.size()));
-            if (std_wd > 0.0 && wasserstein_dist > mean_wd + 1.5 * std_wd)
-                tear_flag = true;
-        }
-
-        regime_h0_persistence.push_back(h0_persist);
-        regime_h1_persistence.push_back(h1_persist);
-        regime_wasserstein_distance.push_back(wasserstein_dist);
-        regime_tear_flag.push_back(tear_flag ? 1 : 0);
-
         for (Eigen::Index i = 0; i < n; ++i) {
             out_dates.push_back(frame_date);
             out_tickers.push_back(active_tickers[static_cast<std::size_t>(i)]);
@@ -405,14 +349,6 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     gm::io::Table regime_table;
     if (auto r = regime_table.add_string_column("date", std::move(regime_dates)); !r) return tl::unexpected(r.error());
     if (auto r = regime_table.add_double_column("structural_change", std::move(regime_structural_change)); !r)
-        return tl::unexpected(r.error());
-    if (auto r = regime_table.add_double_column("h0_total_persistence", std::move(regime_h0_persistence)); !r)
-        return tl::unexpected(r.error());
-    if (auto r = regime_table.add_double_column("h1_total_persistence", std::move(regime_h1_persistence)); !r)
-        return tl::unexpected(r.error());
-    if (auto r = regime_table.add_double_column("wasserstein_distance_from_prev_frame", std::move(regime_wasserstein_distance)); !r)
-        return tl::unexpected(r.error());
-    if (auto r = regime_table.add_bool_column("tear_flag", std::move(regime_tear_flag)); !r)
         return tl::unexpected(r.error());
 
     auto write2 = gm::io::write_parquet(regime_table, output_dir / "regime.parquet");
