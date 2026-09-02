@@ -1,4 +1,4 @@
-﻿#include <gm-core/config.hpp>
+#include <gm-core/config.hpp>
 #include <gm-core/error.hpp>
 #include <gm-backtest/deflated_sharpe.hpp>
 #include <gm-sweep/parameter_grid.hpp>
@@ -113,6 +113,15 @@ int main(int argc, char** argv) {
                 state.record_result(cell_result);
             }
         });
+    // TBB completion order is nondeterministic, and everything downstream
+    // (trial stats, best-cell selection, failed_cells serialization) must
+    // not depend on it: sort into a fixed, cell_id-ordered sequence before
+    // deriving anything from state.cell_results, so sweep_results.json is
+    // bit-reproducible run to run.
+    std::sort(state.cell_results.begin(), state.cell_results.end(),
+        [](const execution::CellResult& a, const execution::CellResult& b) {
+            return a.cell_id < b.cell_id;
+        });
     std::vector<double> successful_sharpes;
     json failed_cells_json = json::array();
     for (const auto& cell_result : state.cell_results) {
@@ -135,7 +144,15 @@ int main(int argc, char** argv) {
         sweep_results["failed_cells"] = failed_cells_json;
         fs::path results_json_path = output_dir / "sweep_results.json";
         std::ofstream results_file{results_json_path};
+        if (!results_file) {
+            spdlog::error("Failed to open sweep_results.json for writing: {}", results_json_path.string());
+            return 1;
+        }
         results_file << sweep_results.dump(2) << "\n";
+        if (!results_file) {
+            spdlog::error("Failed to write sweep_results.json: {}", results_json_path.string());
+            return 1;
+        }
         results_file.close();
         return 1;
     }
@@ -156,7 +173,14 @@ int main(int argc, char** argv) {
     const execution::CellResult* best_cell = nullptr;
     for (const auto& cell_result : state.cell_results) {
         if (!cell_result.success) continue;
-        if (!best_cell || cell_result.sharpe_ratio > best_cell->sharpe_ratio) {
+        // On an exact Sharpe tie, always prefer the smaller cell_id so the
+        // winner is deterministic regardless of TBB scheduling (state.cell_results
+        // is cell_id-ordered at this point, but the tie-break is made explicit
+        // so it stays correct even if the iteration order above ever changes).
+        if (!best_cell ||
+            cell_result.sharpe_ratio > best_cell->sharpe_ratio ||
+            (cell_result.sharpe_ratio == best_cell->sharpe_ratio &&
+             cell_result.cell_id < best_cell->cell_id)) {
             best_cell = &cell_result;
         }
     }
@@ -186,7 +210,15 @@ int main(int argc, char** argv) {
     sweep_results["status"] = "ok";
     fs::path results_json_path = output_dir / "sweep_results.json";
     std::ofstream results_file{results_json_path};
+    if (!results_file) {
+        spdlog::error("Failed to open sweep_results.json for writing: {}", results_json_path.string());
+        return 1;
+    }
     results_file << sweep_results.dump(2) << "\n";
+    if (!results_file) {
+        spdlog::error("Failed to write sweep_results.json: {}", results_json_path.string());
+        return 1;
+    }
     results_file.close();
     return 0;
 }

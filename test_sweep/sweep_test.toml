@@ -1,3 +1,0 @@
-[sweep]
-"signals.z_entry" = [2.0, 2.5]
-"backtest.cost_bps_per_leg" = [3, 5]
