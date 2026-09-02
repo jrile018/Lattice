@@ -1,21 +1,24 @@
 # camera.cpp is pure math (no GL/GLFW/ImGui headers) - compiled
 # directly into the test binary rather than through the gm-view
 # executable target, so these tests need no display, no GL context, and
-# no windowing dependency at all. gl.cpp and data_loader.cpp are not
-# covered here: the former needs a real GL context to exercise
-# meaningfully (out of scope for this pass - see the M3 review), and
-# the latter's Parquet-reading logic is exercised end-to-end by the
-# golden pipeline test's artifacts already existing on disk.
+# no windowing dependency at all. gl.cpp is not covered: it needs
+# a real GL context. data_loader.cpp is tested via data_loader_test.cpp
+# which validates Parquet file loading against real run artifacts.
+
 add_executable(gm-view-tests
   camera_test.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../camera.cpp
+  data_loader_test.cpp
+  ../camera.cpp
+  ../data_loader.cpp
 )
 
-target_include_directories(gm-view-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_include_directories(gm-view-tests PRIVATE ..)
 
 target_link_libraries(gm-view-tests
   PRIVATE
     Catch2::Catch2WithMain
+    gm::core
+    gm::io
 )
 
 catch_discover_tests(gm-view-tests)

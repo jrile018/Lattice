@@ -1,9 +1,6 @@
 #include "data_loader.hpp"
-
 #include <gm-io/parquet.hpp>
-
 #include <spdlog/spdlog.h>
-
 #include <algorithm>
 #include <map>
 
@@ -11,12 +8,10 @@ namespace gm::view {
 
 Result<std::vector<RunInfo>> list_available_runs(const std::filesystem::path& runs_base_dir) {
     std::vector<RunInfo> runs;
-
     std::error_code ec;
     if (!std::filesystem::exists(runs_base_dir, ec) || !std::filesystem::is_directory(runs_base_dir, ec)) {
-        return runs;  // no runs yet is a valid, empty state - not an error
+        return runs;
     }
-
     for (const auto& entry : std::filesystem::directory_iterator(runs_base_dir, ec)) {
         if (!entry.is_directory()) continue;
         if (std::filesystem::exists(entry.path() / "manifest.json")) {
@@ -27,7 +22,6 @@ Result<std::vector<RunInfo>> list_available_runs(const std::filesystem::path& ru
         return tl::unexpected(gm::Error::make(gm::ErrorCode::kIoFailure, "failed to scan runs directory",
                                                runs_base_dir.string() + ": " + ec.message()));
     }
-
     std::sort(runs.begin(), runs.end(),
               [](const RunInfo& a, const RunInfo& b) { return a.run_id > b.run_id; });
     return runs;
@@ -41,7 +35,6 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
             gm::ErrorCode::kNotFound, "gm-geometry has not produced output for this run yet",
             geometry_path.string() + ": " + geometry.error().to_string()));
     }
-
     auto date_col = geometry->string_column("date");
     if (!date_col) return tl::unexpected(date_col.error());
     auto ticker_col = geometry->string_column("ticker");
@@ -66,9 +59,6 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
     LoadedRun result;
     result.frames.reserve(frames_by_date.size());
     for (auto& [date, frame] : frames_by_date) result.frames.push_back(std::move(frame));
-    // std::map iterates in ascending key order already (dates are
-    // ISO-8601, sorting correctly as strings), so result.frames is
-    // already date-ascending without a separate sort.
 
     std::filesystem::path regime_path = run_dir / "gm-geometry" / "regime.parquet";
     auto regime = gm::io::read_parquet(regime_path);
@@ -78,24 +68,93 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
         if (regime_dates && sc) {
             result.regime_dates.assign(regime_dates->begin(), regime_dates->end());
             result.structural_change.assign(sc->begin(), sc->end());
-        } else {
-            // Distinguish "the file doesn't exist yet" (read_parquet
-            // itself fails below, expected for a run gm-geometry hasn't
-            // reached) from "the file exists but doesn't look like a
-            // regime table" (a real schema problem) - the latter would
-            // otherwise silently present as an empty Evolution tab with
-            // no indication anything was wrong, and a user could easily
-            // mistake that for "the run just hasn't finished yet."
-            spdlog::warn(
-                "gm-view: {} exists but is missing the expected 'date'/'structural_change' "
-                "columns - the Evolution tab's regime strip will be empty",
-                regime_path.string());
         }
     }
-    // A missing regime.parquet (the common case: gm-geometry hasn't
-    // produced it yet, or this run predates the metric) is tolerated
-    // silently as "no regime strip to show" - only an unexpected schema
-    // on a file that DOES exist is worth telling the user about.
+
+    std::filesystem::path universe_path = run_dir / "gm-universe" / "universe.parquet";
+    auto universe = gm::io::read_parquet(universe_path);
+    if (universe) {
+        auto ticker_col_u = universe->string_column("ticker");
+        auto security_col = universe->string_column("security_name");
+        auto sector_col = universe->string_column("gics_sector");
+        if (ticker_col_u && security_col && sector_col && 
+            ticker_col_u->size() == security_col->size() && 
+            ticker_col_u->size() == sector_col->size()) {
+            for (std::size_t i = 0; i < ticker_col_u->size(); ++i) {
+                result.ticker_metadata[(*ticker_col_u)[i]] = TickerMetadata{
+                    (*ticker_col_u)[i], (*security_col)[i], (*sector_col)[i]};
+            }
+        }
+    }
+
+    std::filesystem::path scores_path = run_dir / "gm-boundaries" / "scores.parquet";
+    auto scores = gm::io::read_parquet(scores_path);
+    if (scores) {
+        auto date_s = scores->string_column("date");
+        auto ticker_s = scores->string_column("ticker");
+        auto view_s = scores->string_column("view");
+        auto estimator_s = scores->string_column("estimator");
+        auto depth_s = scores->double_column("depth");
+        auto pvalue_s = scores->double_column("pvalue");
+        auto inside_s = scores->bool_column("inside");
+        if (date_s && ticker_s && view_s && estimator_s && depth_s && pvalue_s && inside_s &&
+            date_s->size() == ticker_s->size()) {
+            for (std::size_t i = 0; i < date_s->size(); ++i) {
+                result.scores.push_back(Score{(*date_s)[i], (*ticker_s)[i], (*view_s)[i], (*estimator_s)[i],
+                    (*depth_s)[i], (*pvalue_s)[i], (*inside_s)[i] != 0});
+            }
+        }
+    }
+
+    std::filesystem::path spreads_path = run_dir / "gm-signals" / "spreads.parquet";
+    auto spreads = gm::io::read_parquet(spreads_path);
+    if (spreads) {
+        auto date_sp = spreads->string_column("date");
+        auto ticker_sp = spreads->string_column("ticker");
+        auto z_sp = spreads->double_column("z");
+        auto spread_sp = spreads->double_column("spread");
+        auto half_life_sp = spreads->double_column("half_life");
+        auto n_neighbors_sp = spreads->int64_column("n_neighbors");
+        if (date_sp && ticker_sp && z_sp && spread_sp && half_life_sp && n_neighbors_sp &&
+            date_sp->size() == ticker_sp->size()) {
+            for (std::size_t i = 0; i < date_sp->size(); ++i) {
+                result.spreads.push_back(Spread{(*date_sp)[i], (*ticker_sp)[i], (*z_sp)[i],
+                    (*spread_sp)[i], (*half_life_sp)[i], static_cast<int>((*n_neighbors_sp)[i])});
+            }
+        }
+    }
+
+    std::filesystem::path baskets_path = run_dir / "gm-signals" / "baskets.parquet";
+    auto baskets = gm::io::read_parquet(baskets_path);
+    if (baskets) {
+        auto date_b = baskets->string_column("date");
+        auto ticker_b = baskets->string_column("ticker");
+        auto neighbor_b = baskets->string_column("neighbor_ticker");
+        auto weight_b = baskets->double_column("weight");
+        if (date_b && ticker_b && neighbor_b && weight_b && date_b->size() == ticker_b->size()) {
+            for (std::size_t i = 0; i < date_b->size(); ++i) {
+                result.baskets.push_back(BasketWeight{(*date_b)[i], (*ticker_b)[i], (*neighbor_b)[i], (*weight_b)[i]});
+            }
+        }
+    }
+
+    std::filesystem::path excursions_path = run_dir / "gm-signals" / "excursions.parquet";
+    auto excursions = gm::io::read_parquet(excursions_path);
+    if (excursions) {
+        auto ticker_e = excursions->string_column("ticker");
+        auto start_date_e = excursions->string_column("start_date");
+        auto end_date_e = excursions->string_column("end_date");
+        auto peak_depth_e = excursions->double_column("peak_depth");
+        auto reverted_e = excursions->bool_column("reverted");
+        auto duration_e = excursions->int64_column("duration_days");
+        if (ticker_e && start_date_e && end_date_e && peak_depth_e && reverted_e && duration_e &&
+            ticker_e->size() == start_date_e->size()) {
+            for (std::size_t i = 0; i < ticker_e->size(); ++i) {
+                result.excursions.push_back(Excursion{(*ticker_e)[i], (*start_date_e)[i], (*end_date_e)[i],
+                    (*peak_depth_e)[i], (*reverted_e)[i] != 0, static_cast<int>((*duration_e)[i])});
+            }
+        }
+    }
 
     return result;
 }
