@@ -58,13 +58,17 @@ struct AppState {
 };
 
 void glfw_error_callback(int error, const char* description) {
-    spdlog::error("gm-view: GLFW error {}
+    spdlog::error("gm-view: GLFW error {}: {}", error, description);
+}
 
 std::uint32_t sector_to_color(const std::string& sector) {
     static const std::vector<std::uint32_t> palette = {
         0xFF6B6BFF, 0xFF4ECDC4, 0xFFF7DC6F, 0xBB86FCFF, 0xFF03DAC6,
         0xFFCF6679, 0xFFB39DDB, 0xFF81C784, 0xFFFFB74D, 0xFF64B5F6,
-    }
+    };
+    std::size_t hash = std::hash<std::string>{}(sector) % palette.size();
+    return palette[hash];
+}
 
 std::vector<std::pair<int, double>> get_spreads_for_ticker(
     const gm::view::LoadedRun& loaded, const std::string& ticker, const std::string& date) {
@@ -77,17 +81,6 @@ std::vector<std::pair<int, double>> get_spreads_for_ticker(
     return result;
 }
 
-std::vector<std::pair<std::string, double>> get_peer_basket(
-    const gm::view::LoadedRun& loaded, const std::string& ticker, const std::string& date) {
-    std::vector<std::pair<std::string, double>> r;
-    for (const auto& b : loaded.baskets) {
-        if (b.ticker == ticker && b.date == date) {
-            r.push_back({b.neighbor_ticker, b.weight});
-        }
-    }
-    std::sort(r.begin(), r.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-    return r;
-}
 
 std::vector<gm::view::Excursion> get_excursions_for_ticker(
     const gm::view::LoadedRun& loaded, const std::string& ticker) {
@@ -96,11 +89,6 @@ std::vector<gm::view::Excursion> get_excursions_for_ticker(
         if (e.ticker == ticker) r.push_back(e);
     }
     return r;
-}
-;
-    std::size_t hash = std::hash<std::string>{}(sector) % palette.size();
-    return palette[hash];
-}: {}", error, description);
 }
 
 /// Recolors/repositions the uploaded point cloud for `frame_idx` and
@@ -133,20 +121,24 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, AppState& state, int f
         cz /= n;
     }
 
-    for (const auto& p : frame.positions) {
+    for (std::size_t i = 0; i < frame.positions.size(); ++i) {
+        const auto& p = frame.positions[i];
         // Plain, single color for this first pass - color-by-depth/
-        // sector/momentum (ADR-018's toggle list) is follow-up work
-        // once View A/B scores are wired into the loader.
+        // momentum (ADR-018's toggle list) is follow-up work once
+        // View A/B scores are wired into the loader. Sector coloring
+        // (added here) looks the ticker up by its parallel index into
+        // frame.tickers, since frame.positions carries no identity of
+        // its own.
         std::uint32_t color = 0x5A85FFFF;
-        if (state.show_sectors) {
-            auto meta_it = state.loaded.ticker_metadata.find(ticker);
+        if (state.show_sectors && i < frame.tickers.size()) {
+            auto meta_it = state.loaded.ticker_metadata.find(frame.tickers[i]);
             if (meta_it != state.loaded.ticker_metadata.end()) {
                 color = sector_to_color(meta_it->second.gics_sector);
             }
         }
-        float r = ((color >> 24) & 0xFF) / 255.0f;
-        float g = ((color >> 16) & 0xFF) / 255.0f;
-        float b = ((color >> 8) & 0xFF) / 255.0f;
+        float r = static_cast<float>((color >> 24) & 0xFF) / 255.0f;
+        float g = static_cast<float>((color >> 16) & 0xFF) / 255.0f;
+        float b = static_cast<float>((color >> 8) & 0xFF) / 255.0f;
         verts.push_back({p[0], p[1], p[2], r, g, b});
     }
     renderer.upload(verts);
@@ -385,13 +377,43 @@ int main(int argc, char** argv) {
             if (state.selected_tab == 1) {
                 ImGui::Separator();
                 ImGui::Text("2D Pairs - Select Two Tickers");
-                if (ImGui::Combo("Ticker 1", &state.selected_ticker1_idx,
-                                state.available_ticker_labels.data(),
-                                static_cast<int>(state.available_ticker_labels.size()))) {
-                }
-                if (ImGui::Combo("Ticker 2", &state.selected_ticker2_idx,
-                                state.available_ticker_labels.data(),
-                                static_cast<int>(state.available_ticker_labels.size()))) {
+                ImGui::Combo("Ticker 1", &state.selected_ticker1_idx,
+                             state.available_ticker_labels.data(),
+                             static_cast<int>(state.available_ticker_labels.size()));
+                ImGui::Combo("Ticker 2", &state.selected_ticker2_idx,
+                             state.available_ticker_labels.data(),
+                             static_cast<int>(state.available_ticker_labels.size()));
+
+                // Spread with bands (ADR §9): ticker1's own spread
+                // series for the currently loaded run, plotted against
+                // the standard +/-1, +/-2 sigma reference bands used
+                // everywhere else in this codebase for excursion
+                // thresholds (ADR §6.5's entry/exit z bands).
+                if (state.selected_ticker1_idx >= 0 &&
+                    static_cast<std::size_t>(state.selected_ticker1_idx) < state.available_ticker_labels.size() &&
+                    state.has_loaded_run && !state.loaded.frames.empty()) {
+                    const std::string t1 = state.available_ticker_labels[static_cast<std::size_t>(state.selected_ticker1_idx)];
+                    const auto& frame = state.loaded.frames[static_cast<std::size_t>(state.current_frame)];
+                    auto spread_points = get_spreads_for_ticker(state.loaded, t1, frame.date);
+                    if (!spread_points.empty()) {
+                        std::vector<float> spread_z;
+                        spread_z.reserve(spread_points.size());
+                        for (const auto& [idx, z] : spread_points) spread_z.push_back(static_cast<float>(z));
+                        std::vector<float> upper1(spread_z.size(), 1.0f), lower1(spread_z.size(), -1.0f);
+                        std::vector<float> upper2(spread_z.size(), 2.0f), lower2(spread_z.size(), -2.0f);
+                        ImGui::Separator();
+                        ImGui::Text("Spread (z) for %s", t1.c_str());
+                        if (ImPlot::BeginPlot("##spread_bands", ImVec2(-1, 150))) {
+                            ImPlot::PlotLine("z", spread_z.data(), static_cast<int>(spread_z.size()));
+                            ImPlot::PlotLine("+-1 sigma", upper1.data(), static_cast<int>(upper1.size()));
+                            ImPlot::PlotLine("-1 sigma", lower1.data(), static_cast<int>(lower1.size()));
+                            ImPlot::PlotLine("+-2 sigma", upper2.data(), static_cast<int>(upper2.size()));
+                            ImPlot::PlotLine("-2 sigma", lower2.data(), static_cast<int>(lower2.size()));
+                            ImPlot::EndPlot();
+                        }
+                    } else {
+                        ImGui::TextDisabled("No spread data for %s on %s.", t1.c_str(), frame.date.c_str());
+                    }
                 }
             } else if (state.selected_tab == 2) {
                 ImGui::Separator();
@@ -452,7 +474,24 @@ int main(int argc, char** argv) {
                 
                 if (state.has_loaded_run && !state.loaded.frames.empty()) {
                     const auto& frame = state.loaded.frames[static_cast<std::size_t>(state.current_frame)];
-                    
+
+                    // The "Learn about <pair ticker>" jump buttons below
+                    // refer back to whatever pair is currently selected
+                    // on the 2D Pairs tab, so the panel for one ticker
+                    // can jump straight to the panel for its comparison
+                    // partner. Guarded against an empty/out-of-range
+                    // selection (no run loaded yet, or an empty universe).
+                    const char* ticker1 =
+                        (state.selected_ticker1_idx >= 0 &&
+                         static_cast<std::size_t>(state.selected_ticker1_idx) < state.available_ticker_labels.size())
+                            ? state.available_ticker_labels[static_cast<std::size_t>(state.selected_ticker1_idx)]
+                            : "";
+                    const char* ticker2 =
+                        (state.selected_ticker2_idx >= 0 &&
+                         static_cast<std::size_t>(state.selected_ticker2_idx) < state.available_ticker_labels.size())
+                            ? state.available_ticker_labels[static_cast<std::size_t>(state.selected_ticker2_idx)]
+                            : "";
+
                     // Scores (Position & Depth in all views)
                     std::map<std::string, std::vector<std::pair<std::string, double>>> scores_by_view;
                     for (const auto& score : state.loaded.scores) {
@@ -559,7 +598,6 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-        }
         }
         ImGui::End();
 

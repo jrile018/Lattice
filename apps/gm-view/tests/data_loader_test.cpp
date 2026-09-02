@@ -1,3 +1,4 @@
+#include <cmath>
 #include "../data_loader.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -51,8 +52,24 @@ TEST_CASE("load_run loads scores from scores.parquet", "[data_loader]") {
         CHECK(!score.ticker.empty());
         CHECK(!score.view.empty());
         CHECK(!score.estimator.empty());
-        CHECK(score.depth >= 0.0);
-        CHECK(score.pvalue >= 0.0 && score.pvalue <= 1.0);
+        // depth is a SIGNED margin from the boundary (negative = inside,
+        // positive = outside) - not a magnitude - so it legitimately
+        // goes negative for the large majority of (ticker, date) pairs
+        // that are unremarkable on a given day. The real invariant is
+        // that its sign agrees with the inside flag gm-boundaries wrote
+        // (see libs/gm-boundaries: bool inside = depth <= 0.0).
+        CHECK((score.depth <= 0.0) == score.inside);
+        // pvalue is only meaningful for estimators with a parametric
+        // reference distribution (mahalanobis, fastmcd - both use a
+        // chi-squared complement CDF). The kde estimator has no such
+        // distribution and legitimately reports NaN - confirmed by
+        // checking the real data directly: every pvalue=NaN row in
+        // this run real scores.parquet is estimator="kde".
+        if (score.estimator == "kde") {
+            CHECK(std::isnan(score.pvalue));
+        } else {
+            CHECK((score.pvalue >= 0.0 && score.pvalue <= 1.0));
+        }
     }
 }
 
@@ -81,7 +98,7 @@ TEST_CASE("load_run loads baskets from baskets.parquet", "[data_loader]") {
         CHECK(!basket.date.empty());
         CHECK(!basket.ticker.empty());
         CHECK(!basket.neighbor_ticker.empty());
-        CHECK(basket.weight >= 0.0 && basket.weight <= 1.0);
+        CHECK((basket.weight >= 0.0 && basket.weight <= 1.0));
     }
 }
 
@@ -97,7 +114,7 @@ TEST_CASE("load_run loads excursions from excursions.parquet", "[data_loader]") 
         CHECK(!exc.start_date.empty());
         CHECK(!exc.end_date.empty());
         CHECK(exc.peak_depth > 0.0);
-        CHECK(exc.duration_days > 0);
+        CHECK(exc.duration_days >= 0); // a same-day excursion (enter/revert within one session) legitimately has duration 0
     }
 }
 

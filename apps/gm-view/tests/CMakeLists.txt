@@ -8,11 +8,11 @@
 add_executable(gm-view-tests
   camera_test.cpp
   data_loader_test.cpp
-  /../camera.cpp
-  /../data_loader.cpp
+  ../camera.cpp
+  ../data_loader.cpp
 )
 
-target_include_directories(gm-view-tests PRIVATE /..)
+target_include_directories(gm-view-tests PRIVATE ..)
 
 target_link_libraries(gm-view-tests
   PRIVATE
