@@ -30,11 +30,21 @@ gm::VoidResult run_gm_profiles(const gm::Config& config, const std::filesystem::
             gm::Error::make(gm::ErrorCode::kIoFailure, "failed to create output directory", output_dir.string()));
     }
 
-    // Get upstream universe artifact path from config
-    auto upstream_universe_path_str = config.get_string("upstream.universe_parquet");
-    if (!upstream_universe_path_str) return tl::unexpected(upstream_universe_path_str.error());
-
-    std::filesystem::path upstream_path{*upstream_universe_path_str};
+    // Sibling stage directory, same output_dir.parent_path()/"gm-<stage>"
+    // convention gm-signals/gm-boundaries/gm-geometry already use for
+    // reading upstream artifacts (see e.g. apps/gm-signals/main.cpp) -
+    // works against the real config/params.toml with no extra setup,
+    // unlike the old required-but-absent upstream.universe_parquet key.
+    // An explicit config override is still honored first, for anyone
+    // who wants to point this stage at a universe.parquet living
+    // somewhere else (e.g. a hand-built fixture).
+    std::filesystem::path upstream_path;
+    auto upstream_override = config.get_string("upstream.universe_parquet");
+    if (upstream_override) {
+        upstream_path = *upstream_override;
+    } else {
+        upstream_path = output_dir.parent_path() / "gm-universe" / "universe.parquet";
+    }
     if (!std::filesystem::exists(upstream_path)) {
         return tl::unexpected(gm::Error::make(gm::ErrorCode::kNotFound,
                                                "upstream universe.parquet not found",
@@ -76,11 +86,19 @@ gm::VoidResult run_gm_profiles(const gm::Config& config, const std::filesystem::
             continue;
         }
 
-        // Build JSON object for this profile
+        // Build JSON object for this profile. Canonical profiles.json
+        // schema (must match gm::view::TickerProfile in
+        // apps/gm-view/data_loader.hpp exactly - field names AND
+        // types): ticker, company_name, sic_code (STRING - SIC codes
+        // are conventionally treated as codes, not numbers, and a
+        // string survives a leading-zero code without loss),
+        // sic_description, edgar_url. CompanyProfile::sic_code is
+        // int64_t (it comes off SEC's JSON as a bare number), so it's
+        // converted to a string here at the one point that matters.
         nlohmann::json profile_json;
         profile_json["ticker"] = profile->ticker;
         profile_json["company_name"] = profile->company_name;
-        profile_json["sic_code"] = profile->sic_code;
+        profile_json["sic_code"] = std::to_string(profile->sic_code);
         profile_json["sic_description"] = profile->sic_description;
         profile_json["edgar_url"] = profile->edgar_url;
 
@@ -94,8 +112,19 @@ gm::VoidResult run_gm_profiles(const gm::Config& config, const std::filesystem::
         profiles_data[ticker] = profile_json;
     }
 
-    // Write profiles.json
-    auto output_file = output_dir / "profiles.json";
+    // Write meta/profiles.json - ADR §8.2's artifact contract documents
+    // this artifact as living at runs/<run_id>/meta/profiles.json, a
+    // sibling of every stage's own output_dir (run_dir/gm-<stage>/),
+    // not nested inside this stage's own output_dir - matching the
+    // file-header comment above and how the viewer (data_loader.cpp)
+    // looks for it: run_dir / "meta" / "profiles.json".
+    auto meta_dir = output_dir.parent_path() / "meta";
+    std::filesystem::create_directories(meta_dir, ec);
+    if (ec) {
+        return tl::unexpected(
+            gm::Error::make(gm::ErrorCode::kIoFailure, "failed to create meta directory", meta_dir.string()));
+    }
+    auto output_file = meta_dir / "profiles.json";
     std::ofstream out(output_file);
     if (!out) {
         return tl::unexpected(

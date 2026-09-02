@@ -45,9 +45,21 @@ namespace {
 // Fixed pipeline order (ADR-006). gm-sweep/gm-view are not part of this
 // linear chain: gm-sweep drives many gm-run invocations, gm-view only
 // reads what this chain produced.
-constexpr std::array<const char*, 8> kStageOrder = {
-    "gm-universe", "gm-ingest",   "gm-features",  "gm-geometry",
-    "gm-boundaries", "gm-signals", "gm-backtest", "gm-report",
+//
+// gm-profiles only depends on gm-universe (it reads universe.parquet
+// for the ticker/CIK list) and feeds nothing else in this DAG - no
+// other stage reads meta/profiles.json, only gm-view does, after the
+// whole chain is done. So it can run anywhere after gm-universe without
+// changing what any other stage sees. It's placed right before
+// gm-report (last of the analytical stages, ahead of only the report
+// generator) rather than right after gm-universe, so its ~minutes of
+// real SEC EDGAR network I/O don't sit in front of - and delay the
+// start of - gm-ingest/gm-features/gm-geometry/gm-boundaries/gm-signals/
+// gm-backtest, all of which are on the actual critical path to a
+// tradeable backtest result and none of which need it.
+constexpr std::array<const char*, 9> kStageOrder = {
+    "gm-universe", "gm-ingest",     "gm-features", "gm-geometry",   "gm-boundaries",
+    "gm-signals",  "gm-backtest",   "gm-profiles", "gm-report",
 };
 
 /// Quotes `s` for use as a single argument in a command line passed to

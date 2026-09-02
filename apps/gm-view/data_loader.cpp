@@ -1,7 +1,9 @@
 #include "data_loader.hpp"
 #include <gm-io/parquet.hpp>
 #include <spdlog/spdlog.h>
+#include <nlohmann/json.hpp>
 #include <algorithm>
+#include <fstream>
 #include <map>
 
 namespace gm::view {
@@ -99,9 +101,16 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
         auto inside_s = scores->bool_column("inside");
         if (date_s && ticker_s && view_s && estimator_s && depth_s && pvalue_s && inside_s &&
             date_s->size() == ticker_s->size()) {
+            result.scores.reserve(date_s->size());
             for (std::size_t i = 0; i < date_s->size(); ++i) {
                 result.scores.push_back(Score{(*date_s)[i], (*ticker_s)[i], (*view_s)[i], (*estimator_s)[i],
                     (*depth_s)[i], (*pvalue_s)[i], (*inside_s)[i] != 0});
+            }
+            // Index once here rather than linear-scanning all rows on
+            // every rendered frame in the Learn panel - see LoadedRun's
+            // scores_by_ticker_date comment (data_loader.hpp).
+            for (const auto& score : result.scores) {
+                result.scores_by_ticker_date[{score.ticker, score.date}].push_back(score);
             }
         }
     }
@@ -132,8 +141,12 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
         auto neighbor_b = baskets->string_column("neighbor_ticker");
         auto weight_b = baskets->double_column("weight");
         if (date_b && ticker_b && neighbor_b && weight_b && date_b->size() == ticker_b->size()) {
+            result.baskets.reserve(date_b->size());
             for (std::size_t i = 0; i < date_b->size(); ++i) {
                 result.baskets.push_back(BasketWeight{(*date_b)[i], (*ticker_b)[i], (*neighbor_b)[i], (*weight_b)[i]});
+            }
+            for (const auto& basket : result.baskets) {
+                result.baskets_by_ticker_date[{basket.ticker, basket.date}].push_back(basket);
             }
         }
     }
@@ -149,9 +162,41 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
         auto duration_e = excursions->int64_column("duration_days");
         if (ticker_e && start_date_e && end_date_e && peak_depth_e && reverted_e && duration_e &&
             ticker_e->size() == start_date_e->size()) {
+            result.excursions.reserve(ticker_e->size());
             for (std::size_t i = 0; i < ticker_e->size(); ++i) {
                 result.excursions.push_back(Excursion{(*ticker_e)[i], (*start_date_e)[i], (*end_date_e)[i],
                     (*peak_depth_e)[i], (*reverted_e)[i] != 0, static_cast<int>((*duration_e)[i])});
+            }
+            for (const auto& exc : result.excursions) {
+                result.excursions_by_ticker[exc.ticker].push_back(exc);
+            }
+        }
+    }
+
+    // meta/profiles.json (ADR §8.2) - written by gm-profiles, keyed by
+    // ticker. Optional: an older run predating gm-profiles, or one where
+    // every fetch failed, legitimately has no such file - that's not a
+    // load failure, the Learn panel just has nothing to show for it.
+    std::filesystem::path profiles_path = run_dir / "meta" / "profiles.json";
+    std::error_code profiles_ec;
+    if (std::filesystem::exists(profiles_path, profiles_ec)) {
+        std::ifstream profiles_stream(profiles_path);
+        if (profiles_stream) {
+            try {
+                nlohmann::json profiles_json;
+                profiles_stream >> profiles_json;
+                for (const auto& [ticker, entry] : profiles_json.items()) {
+                    TickerProfile profile;
+                    profile.ticker = entry.value("ticker", ticker);
+                    profile.company_name = entry.value("company_name", std::string{});
+                    profile.sic_code = entry.value("sic_code", std::string{});
+                    profile.sic_description = entry.value("sic_description", std::string{});
+                    profile.edgar_url = entry.value("edgar_url", std::string{});
+                    result.profiles[ticker] = std::move(profile);
+                }
+            } catch (const nlohmann::json::exception& e) {
+                spdlog::warn("gm-view: failed to parse {}: {} - Learn panel will show no profile data",
+                             profiles_path.string(), e.what());
             }
         }
     }

@@ -55,40 +55,97 @@ struct AppState {
     bool show_sectors = false;
     bool show_learn_panel = false;
     std::string learn_panel_ticker;
+    // ticker -> distinct RGBA color, one entry per real GICS sector
+    // present in the loaded run (see assign_sector_colors below).
+    // Rebuilt once per run load, not derived per-point every frame.
+    std::map<std::string, std::uint32_t> sector_colors;
 };
 
 void glfw_error_callback(int error, const char* description) {
     spdlog::error("gm-view: GLFW error {}: {}", error, description);
 }
 
-std::uint32_t sector_to_color(const std::string& sector) {
+/// Assigns each distinct GICS sector actually present in `state.loaded`
+/// a genuinely distinct color, alphabetically: palette[i] for the i-th
+/// sector in sorted order. This is collision-free by construction
+/// (unlike a hash mod palette-size, which guarantees a collision for
+/// GICS's 11 sectors against anything smaller than an 11-entry
+/// palette) as long as the palette has at least as many entries as
+/// there are distinct sectors - checked below with a fallback color
+/// for any overflow, which should never trigger for real GICS data.
+///
+/// Palette literals are plain RGBA byte order (0xRRGGBBAA) throughout -
+/// the previous palette mixed ARGB-authored literals (0xAARRGGBB, alpha
+/// first) into a table that was always decoded as RGBA, so 8 of its 10
+/// entries silently rendered with red=0xFF.
+void assign_sector_colors(AppState& state) {
     static const std::vector<std::uint32_t> palette = {
-        0xFF6B6BFF, 0xFF4ECDC4, 0xFFF7DC6F, 0xBB86FCFF, 0xFF03DAC6,
-        0xFFCF6679, 0xFFB39DDB, 0xFF81C784, 0xFFFFB74D, 0xFF64B5F6,
+        0xE6194BFF,  // red
+        0x3CB44BFF,  // green
+        0xFFE119FF,  // yellow
+        0x4363D8FF,  // blue
+        0xF58231FF,  // orange
+        0x911EB4FF,  // purple
+        0x42D4F4FF,  // cyan
+        0xF032E6FF,  // magenta
+        0xBFEF45FF,  // lime
+        0xFABED4FF,  // pink
+        0x469990FF,  // teal
+        0x9A6324FF,  // brown
     };
-    std::size_t hash = std::hash<std::string>{}(sector) % palette.size();
-    return palette[hash];
+    std::set<std::string> sectors;
+    for (const auto& [ticker, meta] : state.loaded.ticker_metadata) {
+        sectors.insert(meta.gics_sector);
+    }
+    state.sector_colors.clear();
+    std::size_t i = 0;
+    for (const auto& sector : sectors) {  // std::set iterates sorted ascending
+        state.sector_colors[sector] = palette[i % palette.size()];
+        ++i;
+    }
 }
 
-std::vector<std::pair<int, double>> get_spreads_for_ticker(
-    const gm::view::LoadedRun& loaded, const std::string& ticker, const std::string& date) {
-    std::vector<std::pair<int, double>> result;
+std::uint32_t sector_to_color(const AppState& state, const std::string& sector) {
+    auto it = state.sector_colors.find(sector);
+    if (it != state.sector_colors.end()) return it->second;
+    return 0x808080FF;  // neutral gray - a sector with no assigned color (shouldn't happen for real GICS data)
+}
+
+/// Ticker `ticker`'s full spread z-score series across every date
+/// gm-signals scored it, in ascending date order - NOT filtered to a
+/// single date. spreads.parquet has exactly one row per (ticker, date),
+/// so filtering on both ticker AND date (the previous behavior) could
+/// only ever return zero or one point, which is why the plot rendered
+/// a single point. This also plots s.z (the actual z-score, the
+/// quantity the +/-1/+/-2 sigma reference bands are calibrated
+/// against) rather than s.spread (the raw log-price residual, a
+/// different quantity on a different scale that happened to compile
+/// but read as nonsense next to those bands).
+std::vector<std::pair<std::string, double>> get_spread_series_for_ticker(
+    const gm::view::LoadedRun& loaded, const std::string& ticker) {
+    std::vector<std::pair<std::string, double>> result;
     for (const auto& s : loaded.spreads) {
-        if (s.ticker == ticker && s.date == date) {
-            result.push_back({static_cast<int>(result.size()), s.spread});
+        if (s.ticker == ticker) {
+            result.push_back({s.date, s.z});
         }
     }
+    // gm-signals writes spreads.parquet ticker-major/date-ascending, so
+    // this is normally already sorted - sorting defensively here keeps
+    // the plot correct even if that upstream ordering ever changes.
+    std::sort(result.begin(), result.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
     return result;
 }
 
+const std::vector<gm::view::Excursion> kEmptyExcursions;
 
-std::vector<gm::view::Excursion> get_excursions_for_ticker(
+/// O(log n) index lookup (built once in load_run) rather than a linear
+/// scan of every excursion row on every rendered frame.
+const std::vector<gm::view::Excursion>& get_excursions_for_ticker(
     const gm::view::LoadedRun& loaded, const std::string& ticker) {
-    std::vector<gm::view::Excursion> r;
-    for (const auto& e : loaded.excursions) {
-        if (e.ticker == ticker) r.push_back(e);
-    }
-    return r;
+    auto it = loaded.excursions_by_ticker.find(ticker);
+    if (it == loaded.excursions_by_ticker.end()) return kEmptyExcursions;
+    return it->second;
 }
 
 /// Recolors/repositions the uploaded point cloud for `frame_idx` and
@@ -133,7 +190,7 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, AppState& state, int f
         if (state.show_sectors && i < frame.tickers.size()) {
             auto meta_it = state.loaded.ticker_metadata.find(frame.tickers[i]);
             if (meta_it != state.loaded.ticker_metadata.end()) {
-                color = sector_to_color(meta_it->second.gics_sector);
+                color = sector_to_color(state, meta_it->second.gics_sector);
             }
         }
         float r = static_cast<float>((color >> 24) & 0xFF) / 255.0f;
@@ -172,6 +229,16 @@ void load_selected_run(AppState& state, gm::view::PointCloudRenderer& renderer) 
     state.has_loaded_run = true;
     state.current_frame = 0;
     state.camera_initialized = false;
+    // Refresh unconditionally: available_ticker_labels holds const
+    // char* pointers into state.loaded's own strings (frame.tickers),
+    // and state.loaded was just replaced above. Previously this only
+    // happened inside upload_frame, called only when frames is
+    // non-empty - a run with zero geometry frames (has_loaded_run
+    // still true) left the old run's now-dangling pointers in place.
+    state.available_ticker_labels.clear();
+    state.selected_ticker1_idx = -1;
+    state.selected_ticker2_idx = -1;
+    assign_sector_colors(state);
     if (!state.loaded.frames.empty()) upload_frame(renderer, state, 0);
 }
 
@@ -384,25 +451,29 @@ int main(int argc, char** argv) {
                              state.available_ticker_labels.data(),
                              static_cast<int>(state.available_ticker_labels.size()));
 
-                // Spread with bands (ADR §9): ticker1's own spread
-                // series for the currently loaded run, plotted against
-                // the standard +/-1, +/-2 sigma reference bands used
-                // everywhere else in this codebase for excursion
-                // thresholds (ADR §6.5's entry/exit z bands).
+                // Spread with bands (ADR §9): ticker1's full z-score
+                // series across all dates gm-signals scored it for the
+                // currently loaded run, plotted against the standard
+                // +/-1, +/-2 sigma reference bands used everywhere else
+                // in this codebase for excursion thresholds (ADR §6.5's
+                // entry/exit z bands). Not filtered to the current
+                // scrubber frame's date - spreads.parquet has one row
+                // per (ticker, date), so a per-date filter here could
+                // only ever produce zero or one point.
                 if (state.selected_ticker1_idx >= 0 &&
                     static_cast<std::size_t>(state.selected_ticker1_idx) < state.available_ticker_labels.size() &&
-                    state.has_loaded_run && !state.loaded.frames.empty()) {
+                    state.has_loaded_run) {
                     const std::string t1 = state.available_ticker_labels[static_cast<std::size_t>(state.selected_ticker1_idx)];
-                    const auto& frame = state.loaded.frames[static_cast<std::size_t>(state.current_frame)];
-                    auto spread_points = get_spreads_for_ticker(state.loaded, t1, frame.date);
-                    if (!spread_points.empty()) {
+                    auto spread_series = get_spread_series_for_ticker(state.loaded, t1);
+                    if (!spread_series.empty()) {
                         std::vector<float> spread_z;
-                        spread_z.reserve(spread_points.size());
-                        for (const auto& [idx, z] : spread_points) spread_z.push_back(static_cast<float>(z));
+                        spread_z.reserve(spread_series.size());
+                        for (const auto& [date, z] : spread_series) spread_z.push_back(static_cast<float>(z));
                         std::vector<float> upper1(spread_z.size(), 1.0f), lower1(spread_z.size(), -1.0f);
                         std::vector<float> upper2(spread_z.size(), 2.0f), lower2(spread_z.size(), -2.0f);
                         ImGui::Separator();
-                        ImGui::Text("Spread (z) for %s", t1.c_str());
+                        ImGui::Text("Spread (z) for %s (%zu dates, %s to %s)", t1.c_str(), spread_series.size(),
+                                    spread_series.front().first.c_str(), spread_series.back().first.c_str());
                         if (ImPlot::BeginPlot("##spread_bands", ImVec2(-1, 150))) {
                             ImPlot::PlotLine("z", spread_z.data(), static_cast<int>(spread_z.size()));
                             ImPlot::PlotLine("+-1 sigma", upper1.data(), static_cast<int>(upper1.size()));
@@ -412,7 +483,7 @@ int main(int argc, char** argv) {
                             ImPlot::EndPlot();
                         }
                     } else {
-                        ImGui::TextDisabled("No spread data for %s on %s.", t1.c_str(), frame.date.c_str());
+                        ImGui::TextDisabled("No spread data for %s.", t1.c_str());
                     }
                 }
             } else if (state.selected_tab == 2) {
@@ -465,13 +536,39 @@ int main(int argc, char** argv) {
             if (state.show_learn_panel && !state.learn_panel_ticker.empty()) {
                 ImGui::Separator();
                 ImGui::Text("Learn Panel: %s", state.learn_panel_ticker.c_str());
-                
+
                 auto meta_it = state.loaded.ticker_metadata.find(state.learn_panel_ticker);
                 if (meta_it != state.loaded.ticker_metadata.end()) {
                     ImGui::Text("Company: %s", meta_it->second.security_name.c_str());
                     ImGui::Text("Sector: %s", meta_it->second.gics_sector.c_str());
                 }
-                
+
+                // SEC EDGAR profile (meta/profiles.json, ADR §8.2) - not
+                // every run has this (older runs predate gm-profiles,
+                // or a given ticker's fetch failed), so this degrades
+                // gracefully to a plain status line rather than assuming
+                // the entry exists.
+                auto profile_it = state.loaded.profiles.find(state.learn_panel_ticker);
+                if (profile_it != state.loaded.profiles.end()) {
+                    const auto& profile = profile_it->second;
+                    ImGui::Separator();
+                    ImGui::Text("SEC Profile:");
+                    if (!profile.company_name.empty()) {
+                        ImGui::Text("  Entity: %s", profile.company_name.c_str());
+                    }
+                    if (!profile.sic_code.empty() || !profile.sic_description.empty()) {
+                        ImGui::Text("  SIC: %s%s%s", profile.sic_code.c_str(),
+                                    profile.sic_description.empty() ? "" : " - ",
+                                    profile.sic_description.c_str());
+                    }
+                    if (!profile.edgar_url.empty()) {
+                        ImGui::TextWrapped("  EDGAR: %s", profile.edgar_url.c_str());
+                    }
+                } else if (state.has_loaded_run) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("No SEC profile data for %s.", state.learn_panel_ticker.c_str());
+                }
+
                 if (state.has_loaded_run && !state.loaded.frames.empty()) {
                     const auto& frame = state.loaded.frames[static_cast<std::size_t>(state.current_frame)];
 
@@ -481,25 +578,64 @@ int main(int argc, char** argv) {
                     // can jump straight to the panel for its comparison
                     // partner. Guarded against an empty/out-of-range
                     // selection (no run loaded yet, or an empty universe).
-                    const char* ticker1 =
+                    const std::string ticker1 =
                         (state.selected_ticker1_idx >= 0 &&
                          static_cast<std::size_t>(state.selected_ticker1_idx) < state.available_ticker_labels.size())
                             ? state.available_ticker_labels[static_cast<std::size_t>(state.selected_ticker1_idx)]
                             : "";
-                    const char* ticker2 =
+                    const std::string ticker2 =
                         (state.selected_ticker2_idx >= 0 &&
                          static_cast<std::size_t>(state.selected_ticker2_idx) < state.available_ticker_labels.size())
                             ? state.available_ticker_labels[static_cast<std::size_t>(state.selected_ticker2_idx)]
                             : "";
 
-                    // Scores (Position & Depth in all views)
+                    // Renders the two "Learn about <ticker>" jump buttons
+                    // shared by every section below. `scope` gives each
+                    // call site's button pair its own ImGui ID scope, so
+                    // the six buttons across the three sections (which,
+                    // with at most two distinct visible labels - or all
+                    // six identical and empty when no 2D-Pairs pair is
+                    // selected yet - previously collided onto the first
+                    // button's ID) no longer alias each other. Each
+                    // ticker's own button is also skipped entirely when
+                    // that ticker string is empty, rather than rendering
+                    // a "Learn about " button that, if clicked, would set
+                    // learn_panel_ticker to "" and immediately close this
+                    // panel via the !empty() guard above.
+                    auto learn_jump_buttons = [&](const char* scope) {
+                        ImGui::PushID(scope);
+                        if (!ticker1.empty()) {
+                            ImGui::PushID(0);
+                            if (ImGui::Button(("Learn about " + ticker1).c_str(), ImVec2(-1, 0))) {
+                                state.show_learn_panel = true;
+                                state.learn_panel_ticker = ticker1;
+                            }
+                            ImGui::PopID();
+                        }
+                        if (!ticker2.empty()) {
+                            ImGui::PushID(1);
+                            if (ImGui::Button(("Learn about " + ticker2).c_str(), ImVec2(-1, 0))) {
+                                state.show_learn_panel = true;
+                                state.learn_panel_ticker = ticker2;
+                            }
+                            ImGui::PopID();
+                        }
+                        ImGui::PopID();
+                    };
+
+                    // Scores (Position & Depth in all views) - indexed
+                    // lookup (built once in load_run) rather than a
+                    // linear scan of all 1.82M+ real scores rows on
+                    // every rendered frame (ADR-9's <1ms decode budget).
                     std::map<std::string, std::vector<std::pair<std::string, double>>> scores_by_view;
-                    for (const auto& score : state.loaded.scores) {
-                        if (score.ticker == state.learn_panel_ticker && score.date == frame.date) {
+                    auto scores_it =
+                        state.loaded.scores_by_ticker_date.find({state.learn_panel_ticker, frame.date});
+                    if (scores_it != state.loaded.scores_by_ticker_date.end()) {
+                        for (const auto& score : scores_it->second) {
                             scores_by_view[score.view].push_back({score.estimator, score.depth});
                         }
                     }
-                    
+
                     if (!scores_by_view.empty()) {
                         ImGui::Separator();
                         ImGui::Text("Position & Depth (View A/B/C):");
@@ -518,22 +654,16 @@ int main(int argc, char** argv) {
                             }
                             ImGui::EndTable();
                         }
-                        
-                        // Buttons to open Learn panel
-                        if (ImGui::Button(("Learn about " + std::string(ticker1)).c_str(), ImVec2(-1, 0))) {
-                            state.show_learn_panel = true;
-                            state.learn_panel_ticker = ticker1;
-                        }
-                        if (ImGui::Button(("Learn about " + std::string(ticker2)).c_str(), ImVec2(-1, 0))) {
-                            state.show_learn_panel = true;
-                            state.learn_panel_ticker = ticker2;
-                        }
+                        learn_jump_buttons("scores_learn_buttons");
                     }
-                    
-                    // Peer basket
+
+                    // Peer basket - indexed lookup rather than a linear
+                    // scan of all 3.92M+ real basket rows every frame.
                     std::vector<std::pair<std::string, double>> basket;
-                    for (const auto& b : state.loaded.baskets) {
-                        if (b.ticker == state.learn_panel_ticker && b.date == frame.date) {
+                    auto basket_it =
+                        state.loaded.baskets_by_ticker_date.find({state.learn_panel_ticker, frame.date});
+                    if (basket_it != state.loaded.baskets_by_ticker_date.end()) {
+                        for (const auto& b : basket_it->second) {
                             basket.push_back({b.neighbor_ticker, b.weight});
                         }
                     }
@@ -551,20 +681,11 @@ int main(int argc, char** argv) {
                             }
                             ImGui::EndTable();
                         }
-                        
-                        // Buttons to open Learn panel
-                        if (ImGui::Button(("Learn about " + std::string(ticker1)).c_str(), ImVec2(-1, 0))) {
-                            state.show_learn_panel = true;
-                            state.learn_panel_ticker = ticker1;
-                        }
-                        if (ImGui::Button(("Learn about " + std::string(ticker2)).c_str(), ImVec2(-1, 0))) {
-                            state.show_learn_panel = true;
-                            state.learn_panel_ticker = ticker2;
-                        }
+                        learn_jump_buttons("basket_learn_buttons");
                     }
-                    
-                    // Excursion history
-                    auto excursions = get_excursions_for_ticker(state.loaded, state.learn_panel_ticker);
+
+                    // Excursion history - indexed lookup, built once in load_run.
+                    const auto& excursions = get_excursions_for_ticker(state.loaded, state.learn_panel_ticker);
                     if (!excursions.empty()) {
                         ImGui::Separator();
                         ImGui::Text("Excursion History (%zu total):", excursions.size());
@@ -585,16 +706,7 @@ int main(int argc, char** argv) {
                             }
                             ImGui::EndTable();
                         }
-                        
-                        // Buttons to open Learn panel
-                        if (ImGui::Button(("Learn about " + std::string(ticker1)).c_str(), ImVec2(-1, 0))) {
-                            state.show_learn_panel = true;
-                            state.learn_panel_ticker = ticker1;
-                        }
-                        if (ImGui::Button(("Learn about " + std::string(ticker2)).c_str(), ImVec2(-1, 0))) {
-                            state.show_learn_panel = true;
-                            state.learn_panel_ticker = ticker2;
-                        }
+                        learn_jump_buttons("excursion_learn_buttons");
                     }
                 }
             }
