@@ -42,7 +42,7 @@ constexpr std::array<const char*, 8> kExpectedStages = {
 // gm-universe/gm-ingest (M1), gm-geometry (M2), gm-boundaries/
 // gm-signals (M3-M4), gm-report (M4's reversion study), and
 // gm-backtest (M5's walk-forward engine) have graduated from M0 stubs
-// to real implementations; gm-features has not yet (see ADR.md
+// to real implementations; gm-features (M6 ETF co-membership layer) have graduated.md
 // §13 milestones). The per-stage artifact check below just needs to
 // know which real file each graduated stage produces instead of a
 // stub JSON placeholder - this is what lets one golden test track the
@@ -116,6 +116,8 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
             } else if (std::string_view{stage} == "gm-backtest") {
                 CHECK(std::filesystem::exists(run_dir / stage / "daily_returns.parquet"));
                 CHECK(std::filesystem::exists(run_dir / stage / "backtest_results.json"));
+            } else if (std::string_view{stage} == "gm-features") {
+                CHECK(std::filesystem::exists(run_dir / stage / "features.parquet"));
             } else if (std::string_view{stage} == "gm-report") {
                 CHECK(std::filesystem::exists(run_dir / stage / "excursions_tagged.parquet"));
                 CHECK(std::filesystem::exists(run_dir / stage / "reversion_study.json"));
