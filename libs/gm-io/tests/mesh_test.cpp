@@ -197,9 +197,12 @@ TEST_CASE("gmmesh creates the parent directory it is asked to write into",
           "[gm-io][mesh]") {
     // gm-boundaries writes into runs/<id>/gm-boundaries/surfaces/, which does
     // not exist before the first mesh of a run.
-    auto dir = std::filesystem::temp_directory_path() / "gm-mesh-tests" / "nested" / "surfaces";
-    std::filesystem::remove_all(std::filesystem::temp_directory_path() / "gm-mesh-tests" /
-                                "nested");
+    // Named for this test alone: a shared scratch directory plus a
+    // remove_all is the race fixed in universe_test.cpp, and there is no
+    // reason to reintroduce it here.
+    const auto root = std::filesystem::temp_directory_path() / "gm-mesh-tests" / "creates-parent";
+    auto dir = root / "nested" / "surfaces";
+    std::filesystem::remove_all(root);
     const auto path = dir / "frame0001.gmmesh";
     REQUIRE(write_gmmesh(tetrahedron(), path).has_value());
     CHECK(std::filesystem::exists(path));

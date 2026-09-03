@@ -11,8 +11,19 @@ using gm::data::Universe;
 
 namespace {
 
+/// Writes a fixture into a directory OF ITS OWN, named after the fixture.
+///
+/// The nesting is the whole point. catch_discover_tests registers every
+/// TEST_CASE as a separate ctest test, so `ctest -j` runs several processes
+/// of this binary concurrently. When these tests all shared one
+/// "gm-data-tests" directory, each one's closing
+/// remove_all(path.parent_path()) deleted every other running test's
+/// fixtures - a race that produced roughly one failure per three full-suite
+/// runs, always blamed on whichever test happened to be reading at the
+/// moment another finished. Giving each fixture its own directory makes
+/// those existing cleanup calls correct without changing any of them.
 std::filesystem::path write_fixture(const char* name, const std::string& contents) {
-    auto path = std::filesystem::temp_directory_path() / "gm-data-tests" / name;
+    auto path = std::filesystem::temp_directory_path() / "gm-data-tests" / name / name;
     std::filesystem::create_directories(path.parent_path());
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out << contents;

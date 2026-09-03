@@ -17,8 +17,14 @@
 using gm::io::HttpCache;
 
 namespace {
-std::filesystem::path temp_cache_dir() {
-    return std::filesystem::temp_directory_path() / "gm-io-tests" / "http_cache";
+/// A cache directory of this test's own. Same reasoning as
+/// universe_test.cpp's write_fixture: these tests run as concurrent
+/// processes under `ctest -j`, and four of them ended with
+/// remove_all(dir) on what used to be a single shared directory. That had
+/// not yet been observed failing here, but it is the identical race and
+/// worth closing while it is understood rather than after it bites.
+std::filesystem::path temp_cache_dir(const char* test_name) {
+    return std::filesystem::temp_directory_path() / "gm-io-tests" / "http_cache" / test_name;
 }
 
 void write_fake_cache_entry(const std::filesystem::path& dir, const std::string& key,
@@ -39,7 +45,7 @@ void write_fake_cache_entry(const std::filesystem::path& dir, const std::string&
 } // namespace
 
 TEST_CASE("read_cached reads back a hand-written cache entry", "[http_cache]") {
-    auto dir = temp_cache_dir();
+    auto dir = temp_cache_dir("read_cached_hand_written");
     write_fake_cache_entry(dir, "fake_ok", "hello world", 200);
 
     HttpCache cache{dir};
@@ -56,7 +62,7 @@ TEST_CASE("read_cached reads back a hand-written cache entry", "[http_cache]") {
 }
 
 TEST_CASE("read_cached fails cleanly when nothing is cached", "[http_cache]") {
-    auto dir = temp_cache_dir();
+    auto dir = temp_cache_dir("read_cached_missing");
     std::filesystem::remove_all(dir);
 
     HttpCache cache{dir};
@@ -67,7 +73,7 @@ TEST_CASE("read_cached fails cleanly when nothing is cached", "[http_cache]") {
 
 TEST_CASE("get() reports a cached non-2xx response as an error, not a silent success",
           "[http_cache]") {
-    auto dir = temp_cache_dir();
+    auto dir = temp_cache_dir("non_2xx_cached");
     write_fake_cache_entry(dir, "fake_404", "not found", 404);
 
     HttpCache cache{dir};
@@ -88,14 +94,14 @@ TEST_CASE("get() reports a cached non-2xx response as an error, not a silent suc
 }
 
 TEST_CASE("empty cache_key is rejected", "[http_cache]") {
-    HttpCache cache{temp_cache_dir()};
+    HttpCache cache{temp_cache_dir("path_traversal")};
     auto result = cache.read_cached("");
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().code == gm::ErrorCode::kInvalidArgument);
 }
 
 TEST_CASE("cache_key with path traversal characters is rejected", "[http_cache]") {
-    HttpCache cache{temp_cache_dir()};
+    HttpCache cache{temp_cache_dir("path_traversal")};
 
     for (const char* bad_key : {"../escape", "sub/dir", "back\\slash"}) {
         auto result = cache.read_cached(bad_key);
@@ -105,7 +111,7 @@ TEST_CASE("cache_key with path traversal characters is rejected", "[http_cache]"
 }
 
 TEST_CASE("a cache entry with metadata but a missing body file fails cleanly", "[http_cache]") {
-    auto dir = temp_cache_dir();
+    auto dir = temp_cache_dir("metadata_without_body");
     write_fake_cache_entry(dir, "fake_partial", "body content", 200);
     std::filesystem::remove(dir / "fake_partial.body");  // simulate a partial/corrupted cache
 
