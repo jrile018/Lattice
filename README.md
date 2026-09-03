@@ -81,8 +81,57 @@ See ADR.md §8.1 for the full annotated layout. Short version:
 - `tests/golden/` — end-to-end pipeline tests that actually invoke the
   built binaries and check their artifacts.
 
+## Data discipline: point-in-time, or it does not ship
+
+Every backtest in this repo must only ever see information that was
+actually available on the day it is simulating. That sounds obvious and
+is the single easiest thing in quantitative research to get wrong,
+because the failure is silent: the equity curve looks better, not
+broken.
+
+The rule is enforced at the data layer rather than left to the
+discipline of each stage.
+
+**Two dates, never one.** Any record describing a company carries both:
+
+- `period_end` — the date the figures are *about* (e.g. a quarter end).
+- `available_date` — the date those figures were actually *published*.
+
+Any stage simulating day `D` may only read records where
+`available_date <= D`. Never `period_end <= D`.
+
+The distinction is not pedantic. A company's Q1 results describe the
+quarter ending 31 March, but are not published until some weeks into
+May. A backtest that joins them on `period_end` is trading on 31 March
+using numbers no participant could have seen until May. Across fifteen
+years that produces a strategy that appears to work and cannot be
+traded.
+
+**Estimated availability is labelled as such.** Free fundamental data
+sources record `period_end` but generally not `available_date`. Where
+`available_date` has to be estimated (a deliberately pessimistic lag
+after `period_end` rather than an optimistic one), the run manifest
+records `fundamentals_availability = "estimated"`. A run built on real
+publication dates records `"reported"`.
+
+That flag exists so the distinction survives contact with time. Six
+months after a run, nobody remembers which numbers were solid;
+without the flag, estimated data silently acquires the authority of
+measured data. Consumers that care about the difference check the
+manifest rather than trusting the filename.
+
+Swapping in a paid point-in-time source (ADR-016) replaces the
+estimated dates with reported ones and flips the flag. No schema
+change, no recomputation of anything else — which is why the machinery
+is built before the data is bought, not after.
+
+**Survivorship.** The same principle governs the universe itself
+(ADR-001, ADR-016): names are included for the period they were
+actually index members, not selected by who survived to today.
+Coverage gaps are a reported dataset statistic, not a silent omission.
+
 ## Status
 
 M0 (repo skeleton, build plumbing, `gm-core`, NYSE calendar, and the
-full 8-stage pipeline wired end-to-end as stubs) — see ADR.md §13 for
+full 9-stage pipeline wired end-to-end as stubs) — see ADR.md §13 for
 what "done" means at each milestone.
