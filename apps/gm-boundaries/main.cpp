@@ -45,9 +45,15 @@
 
 namespace {
 
+/// One ticker's position on one date, in however many dimensions
+/// gm-geometry actually wrote. Previously three named doubles, which made
+/// the entire stage silently three-dimensional: geometry.embedding_dims
+/// could say 10 and every fit here would still be over x/y/z alone.
 struct FramePoint {
     std::string date;
-    double x, y, z;
+    std::vector<double> coords;
+
+    [[nodiscard]] std::size_t dims() const noexcept { return coords.size(); }
 };
 
 /// ticker -> its embedding history, sorted ascending by date (from
@@ -63,17 +69,40 @@ gm::Result<std::pair<HistoryByTicker, PointsByDate>> load_geometry(const gm::io:
     if (!date_col) return tl::unexpected(date_col.error());
     auto ticker_col = geometry.string_column("ticker");
     if (!ticker_col) return tl::unexpected(ticker_col.error());
-    auto x_col = geometry.double_column("x");
-    if (!x_col) return tl::unexpected(x_col.error());
-    auto y_col = geometry.double_column("y");
-    if (!y_col) return tl::unexpected(y_col.error());
-    auto z_col = geometry.double_column("z");
-    if (!z_col) return tl::unexpected(z_col.error());
+    // x/y/z ARE dimensions 0/1/2 - they keep those names for the readers
+    // that predate higher-dimensional embeddings. Anything past the third
+    // arrives as dim3, dim4, ... and is discovered by probing rather than
+    // declared, so this stage reads whatever gm-geometry wrote without
+    // needing its config repeated here (and without silently ignoring
+    // columns, which is the failure this replaces).
+    std::vector<std::vector<double>> columns;
+    for (const char* name : {"x", "y", "z"}) {
+        auto col = geometry.double_column(name);
+        if (!col) return tl::unexpected(col.error());
+        columns.push_back(std::move(*col));
+    }
+    for (int d = 3;; ++d) {
+        auto col = geometry.double_column("dim" + std::to_string(d));
+        if (!col) break; // no more dimensions in this artifact
+        columns.push_back(std::move(*col));
+    }
+    const std::size_t dims = columns.size();
+    for (const auto& column : columns) {
+        if (column.size() != date_col->size()) {
+            return tl::unexpected(gm::Error::make(
+                gm::ErrorCode::kValidationFailure,
+                "geometry coordinate columns have inconsistent lengths",
+                std::to_string(column.size()) + " vs " + std::to_string(date_col->size())));
+        }
+    }
 
     HistoryByTicker by_ticker;
     PointsByDate by_date;
     for (std::size_t i = 0; i < date_col->size(); ++i) {
-        FramePoint fp{(*date_col)[i], (*x_col)[i], (*y_col)[i], (*z_col)[i]};
+        FramePoint fp;
+        fp.date = (*date_col)[i];
+        fp.coords.reserve(dims);
+        for (std::size_t d = 0; d < dims; ++d) fp.coords.push_back(columns[d][i]);
         by_ticker[(*ticker_col)[i]].push_back(fp);
         by_date[(*date_col)[i]].push_back({(*ticker_col)[i], fp});
     }
@@ -85,13 +114,24 @@ gm::Result<std::pair<HistoryByTicker, PointsByDate>> load_geometry(const gm::io:
 }
 
 Eigen::MatrixXd points_to_matrix(const std::vector<FramePoint>& points) {
-    Eigen::MatrixXd m(static_cast<Eigen::Index>(points.size()), 3);
+    if (points.empty()) return Eigen::MatrixXd(0, 0);
+    const auto dims = static_cast<Eigen::Index>(points.front().dims());
+    Eigen::MatrixXd m(static_cast<Eigen::Index>(points.size()), dims);
     for (std::size_t i = 0; i < points.size(); ++i) {
-        m(static_cast<Eigen::Index>(i), 0) = points[i].x;
-        m(static_cast<Eigen::Index>(i), 1) = points[i].y;
-        m(static_cast<Eigen::Index>(i), 2) = points[i].z;
+        for (Eigen::Index d = 0; d < dims; ++d) {
+            m(static_cast<Eigen::Index>(i), d) =
+                points[i].coords[static_cast<std::size_t>(d)];
+        }
     }
     return m;
+}
+
+Eigen::VectorXd point_to_vector(const FramePoint& point) {
+    Eigen::VectorXd v(static_cast<Eigen::Index>(point.dims()));
+    for (std::size_t d = 0; d < point.dims(); ++d) {
+        v(static_cast<Eigen::Index>(d)) = point.coords[d];
+    }
+    return v;
 }
 
 /// Appends one (date, ticker, view, estimator, depth, pvalue, inside)
@@ -142,7 +182,23 @@ struct ScoreRows {
 gm::VoidResult export_frame_mesh(const Eigen::MatrixXd& training, const std::string& date,
                                   const std::filesystem::path& surfaces_dir, double alpha,
                                   int resolution) {
-    auto fit = gm::boundaries::fit_kde(training, alpha);
+    // A drawable surface is three-dimensional by definition, so when the
+    // embedding has more dimensions than that this fits the FIRST THREE
+    // only. Those are the dominant MDS axes (classical MDS returns axes in
+    // descending eigenvalue order), so it is the most faithful three-
+    // dimensional shadow available - but it is a shadow.
+    //
+    // Consequence worth stating rather than hiding: with k > 3 the drawn
+    // surface is NOT the boundary the scores refer to. A point can sit
+    // inside this shape on screen and still score outside, because its
+    // unusualness lives in a dimension the picture does not have. That
+    // disagreement is information, not a bug - it says "this name looks
+    // ordinary from here, and is not" - and the manifest records the two
+    // dimensionalities so a reader can tell when it is possible.
+    const Eigen::MatrixXd display_training =
+        training.cols() > 3 ? Eigen::MatrixXd(training.leftCols(3)) : training;
+
+    auto fit = gm::boundaries::fit_kde(display_training, alpha);
     if (!fit) return tl::unexpected(fit.error());
 
     // Sample box: the cloud's own extent, padded by three bandwidths per
@@ -155,8 +211,8 @@ gm::VoidResult export_frame_mesh(const Eigen::MatrixXd& training, const std::str
     std::array<double, 3> hi{};
     for (int k = 0; k < 3; ++k) {
         const double pad = 3.0 * fit->bandwidth(k);
-        lo[static_cast<std::size_t>(k)] = training.col(k).minCoeff() - pad;
-        hi[static_cast<std::size_t>(k)] = training.col(k).maxCoeff() + pad;
+        lo[static_cast<std::size_t>(k)] = display_training.col(k).minCoeff() - pad;
+        hi[static_cast<std::size_t>(k)] = display_training.col(k).maxCoeff() + pad;
     }
 
     const gm::boundaries::KdeFit& kde = *fit;
@@ -179,7 +235,7 @@ gm::VoidResult export_frame_mesh(const Eigen::MatrixXd& training, const std::str
     return gm::io::write_gmmesh(out, surfaces_dir / (date + "_A.gmmesh"));
 }
 
-void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, const Eigen::Vector3d& query,
+void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, const Eigen::VectorXd& query,
                             const std::string& date, const std::string& ticker, const char* view,
                             double alpha) {
     auto maha_fit = gm::boundaries::fit_mahalanobis(training);
@@ -254,6 +310,17 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     ScoreRows rows;
     std::int64_t view_a_frames_scored = 0, view_b_points_scored = 0;
     std::int64_t meshes_written = 0, mesh_failures = 0, frame_index = 0;
+    // How many dimensions the fits actually used, discovered from the
+    // artifact rather than assumed, and published so a reader never has to
+    // infer it (this stage having silently been 3-D regardless of config is
+    // exactly what that inference used to get wrong).
+    std::size_t scored_dims = 0;
+    for (const auto& [date, ticker_points] : by_date) {
+        if (!ticker_points.empty()) {
+            scored_dims = ticker_points.front().second.dims();
+            break;
+        }
+    }
     std::string first_mesh_error;
 
     // View A: per frame, fit to every ticker present that frame, score
@@ -266,7 +333,7 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
 
         bool any_scored = false;
         for (const auto& [ticker, fp] : ticker_points) {
-            Eigen::Vector3d query(fp.x, fp.y, fp.z);
+            Eigen::VectorXd query = point_to_vector(fp);
             std::size_t rows_before = rows.dates.size();
             score_both_estimators(rows, training, query, date, ticker, "A", alpha);
             if (rows.dates.size() > rows_before) any_scored = true;
@@ -302,7 +369,7 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
             std::vector<FramePoint> window(history.begin() + static_cast<std::ptrdiff_t>(i - static_cast<std::size_t>(view_b_lookback)),
                                             history.begin() + static_cast<std::ptrdiff_t>(i));
             Eigen::MatrixXd training = points_to_matrix(window);
-            Eigen::Vector3d query(history[i].x, history[i].y, history[i].z);
+            Eigen::VectorXd query = point_to_vector(history[i]);
 
             std::size_t rows_before = rows.dates.size();
             score_both_estimators(rows, training, query, history[i].date, ticker, "B", alpha);
@@ -331,12 +398,19 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     if (!write) return tl::unexpected(write.error());
 
     manifest.set_int("rows_written", static_cast<std::int64_t>(scores.num_rows()));
+    manifest.set_int("embedding_dims_scored", static_cast<std::int64_t>(scored_dims));
     manifest.set_int("view_a_frames_scored", view_a_frames_scored);
     manifest.set_int("view_b_points_scored", view_b_points_scored);
     manifest.set_double("alpha", alpha);
     manifest.set_int("view_b_lookback_days", view_b_lookback);
     if (write_meshes) {
         manifest.set_string("mesh_export", "enabled");
+        manifest.set_int("mesh_dims", 3);
+        if (scored_dims > 3) {
+            manifest.set_string("mesh_projection_note",
+                                 "surfaces are the first three embedding dimensions; scores use " +
+                                     std::to_string(scored_dims));
+        }
         manifest.set_int("meshes_written", meshes_written);
         manifest.set_int("mesh_failures", mesh_failures);
         manifest.set_int("mesh_resolution", mesh_resolution);

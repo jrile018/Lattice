@@ -23,7 +23,16 @@ struct RunInfo {
 struct Frame {
     std::string date;
     std::vector<std::string> tickers;
+    /// The first three embedding dimensions, kept under their historical
+    /// name so existing callers are undisturbed.
     std::vector<std::array<float, 3>> positions;
+    /// Every embedding dimension gm-geometry wrote, laid out
+    /// [ticker][dimension]. When the run is three-dimensional this
+    /// duplicates `positions`; when it is not, this is the only place the
+    /// rest of the embedding exists. Kept because a viewer that silently
+    /// truncated a 10-D embedding to its first three axes would look
+    /// exactly like a working one.
+    std::vector<std::vector<float>> coords;
 };
 
 struct TickerMetadata {

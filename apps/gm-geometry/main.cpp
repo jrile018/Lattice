@@ -268,6 +268,20 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
 
     std::vector<std::string> out_dates, out_tickers;
     std::vector<double> out_x, out_y, out_z;
+    // Coordinates beyond the third, present only when
+    // geometry.embedding_dims > 3. Held separately from x/y/z on purpose:
+    // a k == 3 run then writes a geometry.parquet byte-identical to the one
+    // it wrote before this change, so the golden pipeline test (ADR-020
+    // layer 2) keeps its meaning and no existing run needs regenerating to
+    // stay readable. Every consumer that only knows about x/y/z keeps
+    // working; the ones that want the full embedding read dim3.. as well.
+    //
+    // Before this, embedding_dims was a real config key whose effect was
+    // largely thrown away: classical_mds computed k coordinates and this
+    // stage wrote exactly three of them, so setting it to 10 silently
+    // discarded seven. ADR §6.2's "k=3 display, up to 10 for scoring" was
+    // not actually reachable.
+    std::vector<std::vector<double>> out_extra_dims;
     std::vector<std::string> regime_dates;
     std::vector<double> regime_structural_change;
     std::vector<double> regime_h0_persistence;
@@ -387,6 +401,21 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
             out_x.push_back(aligned(i, 0));
             out_y.push_back(k >= 2 ? aligned(i, 1) : 0.0);
             out_z.push_back(k >= 3 ? aligned(i, 2) : 0.0);
+            if (k > 3) {
+                if (out_extra_dims.empty()) {
+                    out_extra_dims.resize(static_cast<std::size_t>(k - 3));
+                }
+                for (int d = 3; d < static_cast<int>(k); ++d) {
+                    // classical_mds returns k columns, but read defensively:
+                    // a coordinate that does not exist is absent, not zero,
+                    // and zero here would look like "this name sits exactly
+                    // at the origin in dimension 7" rather than "there is no
+                    // dimension 7".
+                    const double value =
+                        d < static_cast<int>(aligned.cols()) ? aligned(i, d) : 0.0;
+                    out_extra_dims[static_cast<std::size_t>(d - 3)].push_back(value);
+                }
+            }
         }
         regime_dates.push_back(frame_date);
         regime_structural_change.push_back(structural_change);
@@ -398,6 +427,27 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     if (auto r = geometry_table.add_double_column("x", std::move(out_x)); !r) return tl::unexpected(r.error());
     if (auto r = geometry_table.add_double_column("y", std::move(out_y)); !r) return tl::unexpected(r.error());
     if (auto r = geometry_table.add_double_column("z", std::move(out_z)); !r) return tl::unexpected(r.error());
+    // dim3, dim4, ... continue the same axis ordering: classical MDS returns
+    // its axes in descending eigenvalue order, so dimension 3 onward carry
+    // progressively less of the structure. x/y/z ARE dim0/dim1/dim2 - they
+    // keep their historical names so existing readers are undisturbed.
+    //
+    // A gotcha worth stating, because the natural assumption is wrong:
+    // x/y/z are NOT stable across a change to embedding_dims. Procrustes
+    // alignment above runs on the full k coordinates, so at k = 10 the
+    // frame-to-frame rotation is a 10-dimensional one, and its projection
+    // onto the first three axes is not the rotation a k = 3 run would have
+    // applied. Measured on 2020-03-27: the same date renders visibly more
+    // spread at k = 10 than at k = 3 on the same axes. The geometry is not
+    // wrong in either case - inter-point distances are what MDS preserves -
+    // but two runs at different k are not comparable coordinate by
+    // coordinate, only shape by shape.
+    for (std::size_t d = 0; d < out_extra_dims.size(); ++d) {
+        const std::string name = "dim" + std::to_string(d + 3);
+        if (auto r = geometry_table.add_double_column(name, std::move(out_extra_dims[d])); !r) {
+            return tl::unexpected(r.error());
+        }
+    }
 
     auto write1 = gm::io::write_parquet(geometry_table, output_dir / "geometry.parquet");
     if (!write1) return tl::unexpected(write1.error());
@@ -438,6 +488,7 @@ gm::VoidResult run_gm_geometry(const gm::Config& config, const std::filesystem::
     manifest.set_int("edge_rows_written", static_cast<std::int64_t>(edges_table.num_rows()));
     manifest.set_int("window_days", window_days);
     manifest.set_int("embedding_dims", k);
+    manifest.set_int("coordinate_columns_written", k > 3 ? k : 3);
     manifest.set_int("knn_k", knn_k);
     manifest.set_double("q_n_over_window", q);
 

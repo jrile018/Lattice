@@ -23,6 +23,7 @@
 #include <limits>
 
 #include <algorithm>
+#include <sstream>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -60,6 +61,24 @@ struct AppState {
     // the checkbox is broken.
     bool show_surface = true;
     bool surface_available = false;
+
+    // How many embedding dimensions this run actually has, and which three
+    // of them are on screen. A run written before dimensions past the third
+    // were kept has exactly three, and these stay 0/1/2.
+    int embedding_dims = 3;
+    int axis_x = 0, axis_y = 1, axis_z = 2;
+
+    // The equity being followed. Drawn red and larger than the rest, in
+    // both the whole-market view and its own trajectory, so the same name
+    // is identifiable as the shape around it changes.
+    int tracked_ticker_idx = -1;
+    std::string tracked_ticker;
+
+    // Trajectory mode replaces "every equity on this date" with "this one
+    // equity across the preceding `trajectory_lookback` dates" - the cloud
+    // View B fits its boundary to. Same 3-D projection, different subject.
+    bool trajectory_mode = false;
+    int trajectory_lookback = 756;
     int selected_ticker1_idx = -1;
     int selected_ticker2_idx = -1;
     std::vector<const char*> available_ticker_labels;
@@ -164,18 +183,46 @@ const std::vector<gm::view::Excursion>& get_excursions_for_ticker(
 /// camera's distance/yaw/pitch stay under the user's own mouse control -
 /// only the recentering follows the data, so switching frames doesn't
 /// fight whatever zoom/angle the user already set).
+/// Reads one coordinate of a ticker's position under the current axis
+/// selection. Falls back to the first three dimensions for a run that has
+/// no others, so this is safe on old artifacts.
+float coord_on_axis(const gm::view::Frame& frame, std::size_t row, int axis) {
+    if (row < frame.coords.size()) {
+        const auto& c = frame.coords[row];
+        if (axis >= 0 && static_cast<std::size_t>(axis) < c.size()) return c[static_cast<std::size_t>(axis)];
+        return 0.0f;
+    }
+    if (row < frame.positions.size() && axis >= 0 && axis < 3) {
+        return frame.positions[row][static_cast<std::size_t>(axis)];
+    }
+    return 0.0f;
+}
+
 void upload_frame(gm::view::PointCloudRenderer& renderer, gm::view::MeshRenderer& mesh_renderer,
-                   AppState& state, int frame_idx) {
+                   gm::view::PointCloudRenderer& highlight_renderer, AppState& state,
+                   int frame_idx) {
     if (frame_idx < 0 || static_cast<std::size_t>(frame_idx) >= state.loaded.frames.size()) return;
     const auto& frame = state.loaded.frames[static_cast<std::size_t>(frame_idx)];
 
+    state.available_ticker_labels.clear();
+    for (const auto& t : frame.tickers) {
+        state.available_ticker_labels.push_back(t.c_str());
+    }
+
     // The View A boundary surface for this exact date, if the run exported
     // one. Cleared first so a frame without a mesh shows no mesh, rather
-    // than leaving the previous frame's envelope on screen around a
-    // different day's points - a picture that would look plausible and be
-    // wrong.
+    // than leaving the previous frame's envelope around a different day's
+    // points - a picture that would look plausible and be wrong.
+    //
+    // Suppressed entirely in trajectory mode: the exported surfaces are
+    // View A (the market's envelope on one date), and drawing one around a
+    // single ticker's own history would be a category error - two
+    // different objects sharing a picture and implying a relationship they
+    // do not have. View B surfaces are not exported yet.
     mesh_renderer.clear();
-    if (state.selected_run >= 0 &&
+    const bool surface_matches_subject =
+        !state.trajectory_mode && state.axis_x == 0 && state.axis_y == 1 && state.axis_z == 2;
+    if (surface_matches_subject && state.selected_run >= 0 &&
         static_cast<std::size_t>(state.selected_run) < state.runs.size()) {
         const auto surface_path =
             state.runs[static_cast<std::size_t>(state.selected_run)].run_dir /
@@ -185,57 +232,87 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, gm::view::MeshRenderer
             if (mesh) {
                 mesh_renderer.upload(*mesh);
             } else {
-                // A corrupt or unreadable surface is worth saying out loud
-                // once; it must not take the whole viewer down, since the
-                // points are still perfectly renderable without it.
                 spdlog::warn("gm-view: could not read boundary surface {}: {}",
                              surface_path.string(), mesh.error().to_string());
             }
         }
     }
 
-    state.available_ticker_labels.clear();
-    for (const auto& t : frame.tickers) {
-        state.available_ticker_labels.push_back(t.c_str());
-    }
-
     std::vector<gm::view::PointVertex> verts;
-    verts.reserve(frame.positions.size());
-
+    std::vector<gm::view::PointVertex> highlight;
     float cx = 0.0f, cy = 0.0f, cz = 0.0f;
-    for (const auto& p : frame.positions) {
-        cx += p[0];
-        cy += p[1];
-        cz += p[2];
-    }
-    if (!frame.positions.empty()) {
-        float n = static_cast<float>(frame.positions.size());
-        cx /= n;
-        cy /= n;
-        cz /= n;
+
+    if (state.trajectory_mode && !state.tracked_ticker.empty()) {
+        // One equity, across the frames leading up to this one. Older
+        // positions fade toward the background so the direction of travel
+        // is readable from a still image, not only while scrubbing.
+        const int first = std::max(0, frame_idx - state.trajectory_lookback + 1);
+        const int span = std::max(1, frame_idx - first);
+        for (int f = first; f <= frame_idx; ++f) {
+            const auto& past = state.loaded.frames[static_cast<std::size_t>(f)];
+            const auto it = std::find(past.tickers.begin(), past.tickers.end(), state.tracked_ticker);
+            if (it == past.tickers.end()) continue;
+            const auto row = static_cast<std::size_t>(std::distance(past.tickers.begin(), it));
+            const float x = coord_on_axis(past, row, state.axis_x);
+            const float y = coord_on_axis(past, row, state.axis_y);
+            const float z = coord_on_axis(past, row, state.axis_z);
+
+            if (f == frame_idx) {
+                // Today: the red marker, drawn separately and larger.
+                highlight.push_back({x, y, z, 1.0f, 0.32f, 0.28f});
+            } else {
+                const float age = static_cast<float>(f - first) / static_cast<float>(span);
+                const float fade = 0.25f + 0.75f * age;
+                verts.push_back({x, y, z, 0.55f * fade, 0.80f * fade, 1.0f * fade});
+            }
+            cx += x;
+            cy += y;
+            cz += z;
+        }
+        const auto n = static_cast<float>(verts.size() + highlight.size());
+        if (n > 0.0f) {
+            cx /= n;
+            cy /= n;
+            cz /= n;
+        }
+    } else {
+        for (std::size_t i = 0; i < frame.tickers.size(); ++i) {
+            const float x = coord_on_axis(frame, i, state.axis_x);
+            const float y = coord_on_axis(frame, i, state.axis_y);
+            const float z = coord_on_axis(frame, i, state.axis_z);
+            cx += x;
+            cy += y;
+            cz += z;
+
+            if (!state.tracked_ticker.empty() && frame.tickers[i] == state.tracked_ticker) {
+                highlight.push_back({x, y, z, 1.0f, 0.32f, 0.28f});
+                continue;
+            }
+            // Sector coloring looks the ticker up by its parallel index
+            // into frame.tickers, since the coordinates carry no identity
+            // of their own.
+            std::uint32_t color = 0x5A85FFFF;
+            if (state.show_sectors) {
+                auto meta_it = state.loaded.ticker_metadata.find(frame.tickers[i]);
+                if (meta_it != state.loaded.ticker_metadata.end()) {
+                    color = sector_to_color(state, meta_it->second.gics_sector);
+                }
+            }
+            const float r = static_cast<float>((color >> 24) & 0xFF) / 255.0f;
+            const float g = static_cast<float>((color >> 16) & 0xFF) / 255.0f;
+            const float b = static_cast<float>((color >> 8) & 0xFF) / 255.0f;
+            verts.push_back({x, y, z, r, g, b});
+        }
+        const auto n = static_cast<float>(frame.tickers.size());
+        if (n > 0.0f) {
+            cx /= n;
+            cy /= n;
+            cz /= n;
+        }
     }
 
-    for (std::size_t i = 0; i < frame.positions.size(); ++i) {
-        const auto& p = frame.positions[i];
-        // Plain, single color for this first pass - color-by-depth/
-        // momentum (ADR-018's toggle list) is follow-up work once
-        // View A/B scores are wired into the loader. Sector coloring
-        // (added here) looks the ticker up by its parallel index into
-        // frame.tickers, since frame.positions carries no identity of
-        // its own.
-        std::uint32_t color = 0x5A85FFFF;
-        if (state.show_sectors && i < frame.tickers.size()) {
-            auto meta_it = state.loaded.ticker_metadata.find(frame.tickers[i]);
-            if (meta_it != state.loaded.ticker_metadata.end()) {
-                color = sector_to_color(state, meta_it->second.gics_sector);
-            }
-        }
-        float r = static_cast<float>((color >> 24) & 0xFF) / 255.0f;
-        float g = static_cast<float>((color >> 16) & 0xFF) / 255.0f;
-        float b = static_cast<float>((color >> 8) & 0xFF) / 255.0f;
-        verts.push_back({p[0], p[1], p[2], r, g, b});
-    }
     renderer.upload(verts);
+    highlight_renderer.upload(highlight);
 
     state.camera.target_x = cx;
     state.camera.target_y = cy;
@@ -243,8 +320,8 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, gm::view::MeshRenderer
 
     if (!state.camera_initialized) {
         float max_dist = 0.1f;
-        for (const auto& p : frame.positions) {
-            float dx = p[0] - cx, dy = p[1] - cy, dz = p[2] - cz;
+        for (const auto& v : verts) {
+            const float dx = v.x - cx, dy = v.y - cy, dz = v.z - cz;
             max_dist = std::max(max_dist, std::sqrt(dx * dx + dy * dy + dz * dz));
         }
         state.camera.distance = max_dist * 3.0f;
@@ -253,7 +330,8 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, gm::view::MeshRenderer
 }
 
 void load_selected_run(AppState& state, gm::view::PointCloudRenderer& renderer,
-                        gm::view::MeshRenderer& mesh_renderer) {
+                        gm::view::MeshRenderer& mesh_renderer,
+                        gm::view::PointCloudRenderer& highlight_renderer) {
     if (state.selected_run < 0 || static_cast<std::size_t>(state.selected_run) >= state.runs.size()) {
         return;
     }
@@ -286,7 +364,17 @@ void load_selected_run(AppState& state, gm::view::PointCloudRenderer& renderer,
             state.runs[static_cast<std::size_t>(state.selected_run)].run_dir / "gm-boundaries" /
             "surfaces");
     }
-    if (!state.loaded.frames.empty()) upload_frame(renderer, mesh_renderer, state, 0);
+    if (!state.loaded.frames.empty()) state.embedding_dims =
+            state.loaded.frames.front().coords.empty()
+                ? 3
+                : static_cast<int>(state.loaded.frames.front().coords.front().size());
+        state.axis_x = 0;
+        state.axis_y = std::min(1, state.embedding_dims - 1);
+        state.axis_z = std::min(2, state.embedding_dims - 1);
+        state.tracked_ticker.clear();
+        state.tracked_ticker_idx = -1;
+        state.trajectory_mode = false;
+        upload_frame(renderer, mesh_renderer, highlight_renderer, state, 0);
 }
 
 } // namespace
@@ -294,6 +382,14 @@ void load_selected_run(AppState& state, gm::view::PointCloudRenderer& renderer,
 int main(int argc, char** argv) {
     std::string runs_base_dir = "runs";
     int start_frame = 0;
+    // These exist so the viewer can be driven from outside, not only by
+    // hand. A GUI whose only entry point is a mouse cannot be exercised on
+    // a machine without one, cannot produce a reproducible screenshot, and
+    // cannot be checked by anything but a person remembering to look -
+    // which is how a view ends up quietly broken between releases.
+    std::string track_ticker;
+    bool start_in_trajectory_mode = false;
+    std::string axes_spec;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--start-frame") {
@@ -317,6 +413,21 @@ int main(int argc, char** argv) {
                 return 1;
             }
             start_frame = static_cast<int>(parsed);
+        } else if (arg == "--track") {
+            if (i + 1 >= argc) {
+                spdlog::error("gm-view: --track requires a ticker symbol");
+                return 1;
+            }
+            track_ticker = argv[++i];
+        } else if (arg == "--trajectory") {
+            start_in_trajectory_mode = true;
+        } else if (arg == "--axes") {
+            if (i + 1 >= argc) {
+                spdlog::error("gm-view: --axes requires three comma-separated dimension indices, "
+                               "e.g. --axes 0,3,7");
+                return 1;
+            }
+            axes_spec = argv[++i];
         } else {
             runs_base_dir = arg;
         }
@@ -387,17 +498,84 @@ int main(int argc, char** argv) {
     }
     gm::view::MeshRenderer mesh_renderer = std::move(*mesh_renderer_result);
 
+    // A second point cloud holding only the tracked equity, so it can be
+    // drawn at a larger size than the rest. PointCloudRenderer takes one
+    // uniform point size per draw call, and a separate call is a great deal
+    // simpler than threading a per-vertex size through the shader for a
+    // cloud that never has more than one point in it.
+    auto highlight_result = gm::view::PointCloudRenderer::create();
+    if (!highlight_result) {
+        spdlog::error("gm-view: failed to create highlight renderer: {}",
+                      highlight_result.error().to_string());
+        return 1;
+    }
+    gm::view::PointCloudRenderer highlight_renderer = std::move(*highlight_result);
+
     AppState state;
     auto runs = gm::view::list_available_runs(runs_base_dir);
     if (runs) {
         state.runs = std::move(*runs);
         if (!state.runs.empty()) {
             state.selected_run = 0;
-            load_selected_run(state, renderer, mesh_renderer);
+            load_selected_run(state, renderer, mesh_renderer, highlight_renderer);
+
+            if (!axes_spec.empty()) {
+                int parsed_axes[3] = {0, 1, 2};
+                int count = 0;
+                std::stringstream ss(axes_spec);
+                std::string token;
+                bool bad = false;
+                while (std::getline(ss, token, ',') && count < 3) {
+                    try {
+                        std::size_t consumed = 0;
+                        const int value = std::stoi(token, &consumed);
+                        if (consumed != token.size() || value < 0 || value >= state.embedding_dims) {
+                            bad = true;
+                            break;
+                        }
+                        parsed_axes[count++] = value;
+                    } catch (const std::exception&) {
+                        bad = true;
+                        break;
+                    }
+                }
+                if (bad || count != 3) {
+                    spdlog::error("gm-view: --axes needs three comma-separated indices in [0,{}), "
+                                   "got '{}'",
+                                   state.embedding_dims, axes_spec);
+                    return 1;
+                }
+                state.axis_x = parsed_axes[0];
+                state.axis_y = parsed_axes[1];
+                state.axis_z = parsed_axes[2];
+            }
+
+            if (!track_ticker.empty()) {
+                // Verified against the frame's actual membership rather than
+                // accepted on faith: a typo'd symbol that silently tracked
+                // nothing would look identical to a working run.
+                const auto& labels = state.available_ticker_labels;
+                const auto found = std::find_if(labels.begin(), labels.end(), [&](const char* t) {
+                    return track_ticker == t;
+                });
+                if (found == labels.end()) {
+                    spdlog::error("gm-view: --track '{}' is not in this run's first frame",
+                                   track_ticker);
+                    return 1;
+                }
+                state.tracked_ticker = track_ticker;
+                state.tracked_ticker_idx = static_cast<int>(std::distance(labels.begin(), found));
+                state.trajectory_mode = start_in_trajectory_mode;
+            } else if (start_in_trajectory_mode) {
+                spdlog::error("gm-view: --trajectory needs --track to say whose path to draw");
+                return 1;
+            }
+            state.camera_initialized = false;
+            upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
             if (start_frame > 0 && !state.loaded.frames.empty()) {
                 state.current_frame =
                     std::min(start_frame, static_cast<int>(state.loaded.frames.size()) - 1);
-                upload_frame(renderer, mesh_renderer, state, state.current_frame);
+                upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
             }
         }
     } else {
@@ -434,7 +612,7 @@ int main(int argc, char** argv) {
                 state.play_accum_seconds = 0.0;
                 state.current_frame =
                     (state.current_frame + 1) % static_cast<int>(state.loaded.frames.size());
-                upload_frame(renderer, mesh_renderer, state, state.current_frame);
+                upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
             }
         }
 
@@ -458,7 +636,7 @@ int main(int argc, char** argv) {
             for (const auto& r : state.runs) run_labels.push_back(r.run_id.c_str());
             if (ImGui::Combo("Run", &state.selected_run, run_labels.data(),
                               static_cast<int>(run_labels.size()))) {
-                load_selected_run(state, renderer, mesh_renderer);
+                load_selected_run(state, renderer, mesh_renderer, highlight_renderer);
             }
         }
 
@@ -469,7 +647,7 @@ int main(int argc, char** argv) {
                         state.current_frame + 1, state.loaded.frames.size());
             int max_frame = static_cast<int>(state.loaded.frames.size()) - 1;
             if (ImGui::SliderInt("##frame", &state.current_frame, 0, max_frame)) {
-                upload_frame(renderer, mesh_renderer, state, state.current_frame);
+                upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
             }
             ImGui::SameLine();
             if (ImGui::Button(state.playing ? "Pause" : "Play")) state.playing = !state.playing;
@@ -489,6 +667,68 @@ int main(int argc, char** argv) {
             } else {
                 ImGui::TextDisabled("No boundary surfaces in this run.");
                 ImGui::TextDisabled("Re-run gm-boundaries with boundaries.write_meshes = true.");
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Embedding: %d dimensions", state.embedding_dims);
+            if (state.embedding_dims > 3) {
+                // Only meaningful when the run has axes to choose between.
+                // A surface can only be drawn for the first three, because
+                // that is the projection gm-boundaries exported; choosing
+                // any other triple hides it rather than showing a shape
+                // that belongs to different axes.
+                std::vector<std::string> axis_names;
+                for (int d = 0; d < state.embedding_dims; ++d) axis_names.push_back("dim" + std::to_string(d));
+                std::vector<const char*> axis_labels;
+                for (const auto& a : axis_names) axis_labels.push_back(a.c_str());
+                bool changed = false;
+                changed |= ImGui::Combo("axis X", &state.axis_x, axis_labels.data(), static_cast<int>(axis_labels.size()));
+                changed |= ImGui::Combo("axis Y", &state.axis_y, axis_labels.data(), static_cast<int>(axis_labels.size()));
+                changed |= ImGui::Combo("axis Z", &state.axis_z, axis_labels.data(), static_cast<int>(axis_labels.size()));
+                if (changed) {
+                    state.camera_initialized = false;
+                    upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
+                }
+                if (!(state.axis_x == 0 && state.axis_y == 1 && state.axis_z == 2)) {
+                    ImGui::TextDisabled("surface hidden: exported for dim0/1/2 only");
+                }
+            }
+
+            ImGui::Separator();
+            if (!state.available_ticker_labels.empty()) {
+                if (ImGui::Combo("Track", &state.tracked_ticker_idx,
+                                  state.available_ticker_labels.data(),
+                                  static_cast<int>(state.available_ticker_labels.size()))) {
+                    // Stored by NAME, not index: the index is into this
+                    // frame's ticker list, and membership changes over
+                    // time, so an index would silently start pointing at a
+                    // different company as you scrub.
+                    state.tracked_ticker =
+                        state.available_ticker_labels[static_cast<std::size_t>(state.tracked_ticker_idx)];
+                    state.camera_initialized = false;
+                    upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
+                }
+                if (!state.tracked_ticker.empty()) {
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear")) {
+                        state.tracked_ticker.clear();
+                        state.tracked_ticker_idx = -1;
+                        state.trajectory_mode = false;
+                        upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
+                    }
+                    if (ImGui::Checkbox("Its path through time", &state.trajectory_mode)) {
+                        state.camera_initialized = false;
+                        upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
+                    }
+                    if (state.trajectory_mode) {
+                        if (ImGui::SliderInt("days", &state.trajectory_lookback, 21, 1512)) {
+                            state.camera_initialized = false;
+                            upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
+                        }
+                        ImGui::TextDisabled("%s over %d days; red is this frame",
+                                            state.tracked_ticker.c_str(), state.trajectory_lookback);
+                    }
+                }
             }
 
             if (ImGui::TabItemButton("Manifold", state.selected_tab == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
@@ -555,7 +795,7 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
                 ImGui::Text("3D Sectors");
                 if (ImGui::Checkbox("Color by Sector", &state.show_sectors)) {
-                    upload_frame(renderer, mesh_renderer, state, state.current_frame);
+                    upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
                 }
                 ImGui::Text("Sectors in universe:");
                 std::set<std::string> sectors_seen;
@@ -795,7 +1035,10 @@ int main(int argc, char** argv) {
             if (state.show_surface) {
                 mesh_renderer.draw(mvp, 0.24f, 0.85f, 0.36f, 0.28f);
             }
-            renderer.draw(mvp, 8.0f);
+            renderer.draw(mvp, state.trajectory_mode ? 5.0f : 8.0f);
+            // Last and largest: the tracked equity must be findable
+            // whatever it is sitting behind.
+            highlight_renderer.draw(mvp, 22.0f);
         }
 
         ImGui::Render();

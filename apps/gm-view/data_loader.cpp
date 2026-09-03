@@ -46,6 +46,15 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
     auto y_col = geometry->double_column("y");
     if (!y_col) return tl::unexpected(y_col.error());
     auto z_col = geometry->double_column("z");
+    // x/y/z are dimensions 0/1/2; anything past the third arrives as
+    // dim3, dim4, ... and is discovered by probing, so the viewer reads
+    // whatever the run happens to contain without being told.
+    std::vector<std::vector<double>> extra_dim_cols;
+    for (int d = 3;; ++d) {
+        auto col = geometry->double_column("dim" + std::to_string(d));
+        if (!col) break;
+        extra_dim_cols.push_back(std::move(*col));
+    }
     if (!z_col) return tl::unexpected(z_col.error());
 
     std::map<std::string, Frame> frames_by_date;
@@ -54,6 +63,13 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
         Frame& frame = frames_by_date[date];
         frame.date = date;
         frame.tickers.push_back((*ticker_col)[i]);
+        std::vector<float> all_coords;
+        all_coords.reserve(3 + extra_dim_cols.size());
+        all_coords.push_back(static_cast<float>((*x_col)[i]));
+        all_coords.push_back(static_cast<float>((*y_col)[i]));
+        all_coords.push_back(static_cast<float>((*z_col)[i]));
+        for (const auto& col : extra_dim_cols) all_coords.push_back(static_cast<float>(col[i]));
+        frame.coords.push_back(std::move(all_coords));
         frame.positions.push_back({static_cast<float>((*x_col)[i]), static_cast<float>((*y_col)[i]),
                                     static_cast<float>((*z_col)[i])});
     }
