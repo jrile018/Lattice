@@ -157,6 +157,75 @@ Coverage gaps are a reported dataset statistic, not a silent omission.
 
 ## Status
 
-M0 (repo skeleton, build plumbing, `gm-core`, NYSE calendar, and the
-full 9-stage pipeline wired end-to-end as stubs) — see ADR.md §13 for
-what "done" means at each milestone.
+This section describes what is **built and verified**. It deliberately
+says nothing about what the results *mean* — in particular, whether
+ADR-013's reversion gate passes is a question about findings, not about
+code, and answering it here by implication would be exactly the kind of
+quiet overclaim the rest of this repo is written to avoid.
+
+**Test suite: 309 tests, green in both `linux-gcc-release` and
+`linux-gcc-asan`.** Every milestone below closes only on that pair (ADR.md
+§13).
+
+### Built
+
+| Milestone | What exists |
+|---|---|
+| M0 — Skeleton | Repo, CMake presets, vcpkg manifest, `gm-core`, NYSE calendar, all nine stages wired end-to-end |
+| M1 — Data layer | `gm-io` (Parquet, HTTP+cache, CSV), point-in-time universe, `gm-ingest` with validation screens; 15-year panel builds |
+| M2 — Geometry | Shrinkage, RMT clipping, Mantegna distance, classical MDS, Procrustes, MST, with reference tests |
+| M3 — Boundaries + viewer | Mahalanobis, KDE level set, marching tetrahedra; views A and B; `gm-view` against real artifacts |
+| M4 — Signals | Peer baskets, OU fitting, excursion tracking, earnings/8-K tagging, the reversion study |
+| M5 — Backtest | Walk-forward engine, cost model, Deflated Sharpe, `gm-sweep` sharding |
+| M6 — Depth | FastMCD, tear veto, remaining viewer tabs, SEC company profiles, ETF co-membership |
+
+### In progress — ADR-022, the valuation geometry (View D)
+
+A second robust ellipsoid per equity, over point-in-time valuation yields
+rather than embedding coordinates, so the pipeline can distinguish "this
+name diverged because it got cheap" from "this name diverged because the
+business is deteriorating". Price geometry alone cannot see that
+difference, and it is the difference the reversion gate turns on.
+
+| Piece | State |
+|---|---|
+| ADR-022 + §6.6 (the design) | Written down, in this repo, not in a conversation |
+| `gm::features::valuation` — the as-of rule and the three yields | Built, 19 tests, 6 deliberate defects reintroduced and caught |
+| `gm::data::fundamentals` — the SEC XBRL reader | Built, 14 tests, 7 deliberate defects reintroduced and caught |
+| `gm-ingest` wiring → `fundamentals.parquet` | **Not started** — blocked, see below |
+| View D fit in `gm-boundaries` | **Not started** — reuses the existing FastMCD path unchanged |
+
+### Known gaps, stated plainly
+
+- **Accounting tag mapping is the blocker, and it is a research problem
+  rather than a coding one.** EBITDA is not an XBRL concept — it has to be
+  assembled from operating income plus depreciation, and D&A appears under
+  three different tags for a single issuer. There is no combined total-debt
+  tag. `ShortTermInvestments` is absent for at least one large filer, which
+  understates net cash and therefore distorts enterprise value. Net effect:
+  **`E/P` and `FCF/P` are derivable from unambiguous tags today;
+  `EBITDA/EV` is not.** It needs a documented fallback chain with per-field
+  coverage reported, not a silent guess.
+- **XBRL coverage before ~2011 is unmeasured.** The taxonomy was phased in
+  from 2009 for large filers, so the early years of ADR-002's 2010 start
+  need a per-issuer coverage check. That becomes a reported dataset
+  statistic; it is not something to assume.
+- **ADR-020's reference-test requirement is met for FastMCD** (against the
+  published Hawkins–Bradu–Kass example) **and for the fundamentals reader**
+  (against Apple's filed figures). Other in-house numerics named in that
+  ADR still rest on their own layer-1 tests.
+- **View D has never been fitted to real data**, because there is no
+  fundamentals artifact yet. Nothing in this repo claims it works — only
+  that the pieces beneath it do, individually.
+
+### How the tests here are meant to be read
+
+A regression test that has never been watched to fail is a claim, not a
+test. Everything above described as "defects reintroduced and caught"
+means exactly that: the bug was put back into the source, the project was
+rebuilt, and the test was confirmed to fail before the bug was removed
+again. This convention exists because an earlier commit in this repo
+claimed three tests each pinned a specific bug when two of them detected
+nothing at all — a review found 13 of 14 tests passing against the very
+bugs they were named after. Where a test does *not* catch something it
+might be assumed to, the test file says so.
