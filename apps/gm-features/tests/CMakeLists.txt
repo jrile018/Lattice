@@ -7,8 +7,10 @@
 add_executable(gm-features-tests
   centrality_test.cpp
   returns_test.cpp
+  valuation_test.cpp
   ../centrality.cpp
   ../returns.cpp
+  ../valuation.cpp
 )
 
 target_include_directories(gm-features-tests PRIVATE ..)
