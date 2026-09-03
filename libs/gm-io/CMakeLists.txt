@@ -6,6 +6,7 @@ add_library(gm-io STATIC
   src/http_cache.cpp
   src/csv.cpp
   src/table.cpp
+  src/mesh.cpp
   src/parquet.cpp
 )
 add_library(gm::io ALIAS gm-io)

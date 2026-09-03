@@ -3,19 +3,34 @@
 // per-ticker causal history) - against gm-geometry's embeddings, using
 // both estimators from gm-boundaries-lib (Mahalanobis + KDE) per view.
 //
-// Scope note: mesh export (surfaces/*.gmmesh, ADR §8.2) is opt-in via
-// boundaries.write_meshes, defaulting OFF. Marching-tetrahedra mesh
-// generation exists to feed the viewer (gm-view), which does not exist
-// yet this milestone - generating and writing a mesh for every one of
-// several thousand frames by default would be real, avoidable cost with
-// no consumer yet. The scores themselves (the actual "is this stock
-// inside or outside its normal range" analytical deliverable ADR-011
-// cares about) do not depend on meshes existing at all.
+// Mesh export (surfaces/*.gmmesh, ADR §8.2) is opt-in via
+// boundaries.write_meshes, defaulting OFF, because writing a mesh for
+// every one of several thousand frames is real cost that most runs do
+// not need - the scores themselves, which are the analytical deliverable
+// ADR-011 cares about, do not depend on meshes existing at all.
+//
+// This note previously described that flag as though it worked. It did
+// not: no code read boundaries.write_meshes, no writer existed, and the
+// manifest line reporting the setting was a hardcoded string saying
+// "disabled". The consequence was that the boundary SURFACE - the lumpy
+// non-convex envelope ADR-011 specifies and the entire visual point of
+// gm-view - could not be produced at all, by any configuration. The flag
+// is now real. Three knobs:
+//
+//   boundaries.write_meshes      bool, default false
+//   boundaries.mesh_resolution   int,  default 32 (grid cells per axis)
+//   boundaries.mesh_frame_stride int,  default 1 (export every Nth frame)
+//
+// The stride exists because resolution and frame count multiply: a full
+// 4129-frame run at resolution 32 is thousands of files, and looking at
+// one year in the viewer does not require meshing all sixteen.
 
 #include <gm-boundaries/kde.hpp>
 #include <gm-boundaries/mahalanobis.hpp>
 #include <gm-boundaries/fastmcd.hpp>
+#include <gm-boundaries/marching_tetrahedra.hpp>
 #include <gm-core/stage_main.hpp>
+#include <gm-io/mesh.hpp>
 #include <gm-io/parquet.hpp>
 #include <gm-io/table.hpp>
 
@@ -116,6 +131,54 @@ struct ScoreRows {
     }
 };
 
+/// Extracts one frame's View A boundary surface and writes it as a
+/// .gmmesh, so gm-view has an envelope to draw around the point cloud
+/// rather than only the points.
+///
+/// The isosurface is the KDE level set: the same `level` the scores are
+/// computed against, so the drawn surface is literally the boundary the
+/// "inside/outside" column refers to, not a separate cosmetic shape that
+/// could drift away from it.
+gm::VoidResult export_frame_mesh(const Eigen::MatrixXd& training, const std::string& date,
+                                  const std::filesystem::path& surfaces_dir, double alpha,
+                                  int resolution) {
+    auto fit = gm::boundaries::fit_kde(training, alpha);
+    if (!fit) return tl::unexpected(fit.error());
+
+    // Sample box: the cloud's own extent, padded by three bandwidths per
+    // axis. Beyond three bandwidths a Gaussian kernel contributes
+    // essentially nothing, so the level set is guaranteed to close inside
+    // the box instead of being clipped flat against its walls - which
+    // would produce a surface with a hole in it and look like a
+    // rendering bug rather than a sampling one.
+    std::array<double, 3> lo{};
+    std::array<double, 3> hi{};
+    for (int k = 0; k < 3; ++k) {
+        const double pad = 3.0 * fit->bandwidth(k);
+        lo[static_cast<std::size_t>(k)] = training.col(k).minCoeff() - pad;
+        hi[static_cast<std::size_t>(k)] = training.col(k).maxCoeff() + pad;
+    }
+
+    const gm::boundaries::KdeFit& kde = *fit;
+    auto field = [&kde](double x, double y, double z) {
+        Eigen::Vector3d point(x, y, z);
+        auto density = gm::boundaries::kde_density(kde, point);
+        // A density evaluation cannot meaningfully fail for a finite
+        // point against a fitted model. Treating an unexpected failure as
+        // zero density (definitively outside) keeps the isosurface
+        // well-defined rather than leaving an unexplained hole in it.
+        return density ? *density : 0.0;
+    };
+
+    auto mesh = gm::boundaries::marching_tetrahedra(field, lo, hi, resolution, fit->level);
+    if (!mesh) return tl::unexpected(mesh.error());
+
+    gm::io::MeshData out;
+    out.vertices = mesh->vertices;
+    out.triangles = mesh->triangles;
+    return gm::io::write_gmmesh(out, surfaces_dir / (date + "_A.gmmesh"));
+}
+
 void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, const Eigen::Vector3d& query,
                             const std::string& date, const std::string& ticker, const char* view,
                             double alpha) {
@@ -165,6 +228,20 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
                                   gm::Manifest& manifest) {
     double alpha = config.get_double_or("boundaries.alpha", 0.05);
     std::int64_t view_b_lookback = config.get_int_or("boundaries.view_b_lookback_days", 60);
+    const bool write_meshes = config.get_bool_or("boundaries.write_meshes", false);
+    const std::int64_t mesh_resolution = config.get_int_or("boundaries.mesh_resolution", 32);
+    const std::int64_t mesh_frame_stride = config.get_int_or("boundaries.mesh_frame_stride", 1);
+    if (write_meshes && (mesh_resolution < 1 || mesh_resolution > 512)) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kInvalidArgument,
+            "boundaries.mesh_resolution must be between 1 and 512",
+            std::to_string(mesh_resolution)));
+    }
+    if (write_meshes && mesh_frame_stride < 1) {
+        return tl::unexpected(gm::Error::make(gm::ErrorCode::kInvalidArgument,
+                                               "boundaries.mesh_frame_stride must be at least 1",
+                                               std::to_string(mesh_frame_stride)));
+    }
 
     std::filesystem::path geometry_dir = output_dir.parent_path() / "gm-geometry";
     auto geometry = gm::io::read_parquet(geometry_dir / "geometry.parquet");
@@ -176,6 +253,8 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
 
     ScoreRows rows;
     std::int64_t view_a_frames_scored = 0, view_b_points_scored = 0;
+    std::int64_t meshes_written = 0, mesh_failures = 0, frame_index = 0;
+    std::string first_mesh_error;
 
     // View A: per frame, fit to every ticker present that frame, score
     // every ticker in that same frame against its own frame's fit.
@@ -193,6 +272,26 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
             if (rows.dates.size() > rows_before) any_scored = true;
         }
         if (any_scored) ++view_a_frames_scored;
+
+        if (write_meshes && (frame_index % mesh_frame_stride) == 0) {
+            auto exported = export_frame_mesh(training, date, output_dir / "surfaces", alpha,
+                                               static_cast<int>(mesh_resolution));
+            if (exported) {
+                ++meshes_written;
+            } else {
+                // A frame whose surface cannot be extracted does not halt
+                // the stage - the scores are the deliverable and they are
+                // already computed. But a run that silently produced zero
+                // meshes while reporting success is exactly the failure
+                // this stage's other counters exist to prevent, so the
+                // count and the first message both reach the manifest.
+                ++mesh_failures;
+                if (first_mesh_error.empty()) {
+                    first_mesh_error = date + ": " + exported.error().message;
+                }
+            }
+        }
+        ++frame_index;
     }
 
     // View B: per ticker, strictly causal - the trailing
@@ -236,7 +335,16 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     manifest.set_int("view_b_points_scored", view_b_points_scored);
     manifest.set_double("alpha", alpha);
     manifest.set_int("view_b_lookback_days", view_b_lookback);
-    manifest.set_string("mesh_export", "disabled (boundaries.write_meshes not set - see file header)");
+    if (write_meshes) {
+        manifest.set_string("mesh_export", "enabled");
+        manifest.set_int("meshes_written", meshes_written);
+        manifest.set_int("mesh_failures", mesh_failures);
+        manifest.set_int("mesh_resolution", mesh_resolution);
+        manifest.set_int("mesh_frame_stride", mesh_frame_stride);
+        if (!first_mesh_error.empty()) manifest.set_string("mesh_first_error", first_mesh_error);
+    } else {
+        manifest.set_string("mesh_export", "disabled (boundaries.write_meshes = false)");
+    }
     // Expected row count is (view_a_frames_scored + view_b_points_scored)
     // * 2 estimators; these counters make the gap between that and
     // rows_written attributable, instead of requiring the reader to

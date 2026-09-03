@@ -34,6 +34,10 @@
 #include "data_loader.hpp"
 #include "gl.hpp"
 
+#include <gm-io/mesh.hpp>
+
+#include <filesystem>
+
 namespace {
 
 struct AppState {
@@ -49,6 +53,13 @@ struct AppState {
     bool camera_initialized = false;
     // UI state for three new tabs
     int selected_tab = 0;  // 0=Manifold, 1=2D Pairs, 2=3D Sectors, 3=Evolution
+    // The boundary surface is drawn when the run has one on disk. Runs made
+    // without boundaries.write_meshes have no surfaces/ directory at all, in
+    // which case this toggle simply has nothing to show - which the control
+    // panel says explicitly rather than leaving the user wondering whether
+    // the checkbox is broken.
+    bool show_surface = true;
+    bool surface_available = false;
     int selected_ticker1_idx = -1;
     int selected_ticker2_idx = -1;
     std::vector<const char*> available_ticker_labels;
@@ -153,9 +164,35 @@ const std::vector<gm::view::Excursion>& get_excursions_for_ticker(
 /// camera's distance/yaw/pitch stay under the user's own mouse control -
 /// only the recentering follows the data, so switching frames doesn't
 /// fight whatever zoom/angle the user already set).
-void upload_frame(gm::view::PointCloudRenderer& renderer, AppState& state, int frame_idx) {
+void upload_frame(gm::view::PointCloudRenderer& renderer, gm::view::MeshRenderer& mesh_renderer,
+                   AppState& state, int frame_idx) {
     if (frame_idx < 0 || static_cast<std::size_t>(frame_idx) >= state.loaded.frames.size()) return;
     const auto& frame = state.loaded.frames[static_cast<std::size_t>(frame_idx)];
+
+    // The View A boundary surface for this exact date, if the run exported
+    // one. Cleared first so a frame without a mesh shows no mesh, rather
+    // than leaving the previous frame's envelope on screen around a
+    // different day's points - a picture that would look plausible and be
+    // wrong.
+    mesh_renderer.clear();
+    if (state.selected_run >= 0 &&
+        static_cast<std::size_t>(state.selected_run) < state.runs.size()) {
+        const auto surface_path =
+            state.runs[static_cast<std::size_t>(state.selected_run)].run_dir /
+            "gm-boundaries" / "surfaces" / (frame.date + "_A.gmmesh");
+        if (std::filesystem::exists(surface_path)) {
+            auto mesh = gm::io::read_gmmesh(surface_path);
+            if (mesh) {
+                mesh_renderer.upload(*mesh);
+            } else {
+                // A corrupt or unreadable surface is worth saying out loud
+                // once; it must not take the whole viewer down, since the
+                // points are still perfectly renderable without it.
+                spdlog::warn("gm-view: could not read boundary surface {}: {}",
+                             surface_path.string(), mesh.error().to_string());
+            }
+        }
+    }
 
     state.available_ticker_labels.clear();
     for (const auto& t : frame.tickers) {
@@ -215,7 +252,8 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, AppState& state, int f
     }
 }
 
-void load_selected_run(AppState& state, gm::view::PointCloudRenderer& renderer) {
+void load_selected_run(AppState& state, gm::view::PointCloudRenderer& renderer,
+                        gm::view::MeshRenderer& mesh_renderer) {
     if (state.selected_run < 0 || static_cast<std::size_t>(state.selected_run) >= state.runs.size()) {
         return;
     }
@@ -239,7 +277,16 @@ void load_selected_run(AppState& state, gm::view::PointCloudRenderer& renderer) 
     state.selected_ticker1_idx = -1;
     state.selected_ticker2_idx = -1;
     assign_sector_colors(state);
-    if (!state.loaded.frames.empty()) upload_frame(renderer, state, 0);
+    // Whether this run has surfaces at all, decided once per run rather
+    // than probed every frame.
+    state.surface_available = false;
+    if (state.selected_run >= 0 &&
+        static_cast<std::size_t>(state.selected_run) < state.runs.size()) {
+        state.surface_available = std::filesystem::is_directory(
+            state.runs[static_cast<std::size_t>(state.selected_run)].run_dir / "gm-boundaries" /
+            "surfaces");
+    }
+    if (!state.loaded.frames.empty()) upload_frame(renderer, mesh_renderer, state, 0);
 }
 
 } // namespace
@@ -332,17 +379,25 @@ int main(int argc, char** argv) {
     }
     gm::view::PointCloudRenderer renderer = std::move(*renderer_result);
 
+    auto mesh_renderer_result = gm::view::MeshRenderer::create();
+    if (!mesh_renderer_result) {
+        spdlog::error("gm-view: failed to create mesh renderer: {}",
+                      mesh_renderer_result.error().to_string());
+        return 1;
+    }
+    gm::view::MeshRenderer mesh_renderer = std::move(*mesh_renderer_result);
+
     AppState state;
     auto runs = gm::view::list_available_runs(runs_base_dir);
     if (runs) {
         state.runs = std::move(*runs);
         if (!state.runs.empty()) {
             state.selected_run = 0;
-            load_selected_run(state, renderer);
+            load_selected_run(state, renderer, mesh_renderer);
             if (start_frame > 0 && !state.loaded.frames.empty()) {
                 state.current_frame =
                     std::min(start_frame, static_cast<int>(state.loaded.frames.size()) - 1);
-                upload_frame(renderer, state, state.current_frame);
+                upload_frame(renderer, mesh_renderer, state, state.current_frame);
             }
         }
     } else {
@@ -379,7 +434,7 @@ int main(int argc, char** argv) {
                 state.play_accum_seconds = 0.0;
                 state.current_frame =
                     (state.current_frame + 1) % static_cast<int>(state.loaded.frames.size());
-                upload_frame(renderer, state, state.current_frame);
+                upload_frame(renderer, mesh_renderer, state, state.current_frame);
             }
         }
 
@@ -403,7 +458,7 @@ int main(int argc, char** argv) {
             for (const auto& r : state.runs) run_labels.push_back(r.run_id.c_str());
             if (ImGui::Combo("Run", &state.selected_run, run_labels.data(),
                               static_cast<int>(run_labels.size()))) {
-                load_selected_run(state, renderer);
+                load_selected_run(state, renderer, mesh_renderer);
             }
         }
 
@@ -414,7 +469,7 @@ int main(int argc, char** argv) {
                         state.current_frame + 1, state.loaded.frames.size());
             int max_frame = static_cast<int>(state.loaded.frames.size()) - 1;
             if (ImGui::SliderInt("##frame", &state.current_frame, 0, max_frame)) {
-                upload_frame(renderer, state, state.current_frame);
+                upload_frame(renderer, mesh_renderer, state, state.current_frame);
             }
             ImGui::SameLine();
             if (ImGui::Button(state.playing ? "Pause" : "Play")) state.playing = !state.playing;
@@ -426,6 +481,16 @@ int main(int argc, char** argv) {
             // Tab selection
             ImGui::Separator();
             ImGui::BeginTabBar("ViewTabs");
+            if (state.surface_available) {
+                ImGui::Checkbox("Boundary surface", &state.show_surface);
+                if (state.show_surface && mesh_renderer.empty()) {
+                    ImGui::TextDisabled("no surface exported for this frame");
+                }
+            } else {
+                ImGui::TextDisabled("No boundary surfaces in this run.");
+                ImGui::TextDisabled("Re-run gm-boundaries with boundaries.write_meshes = true.");
+            }
+
             if (ImGui::TabItemButton("Manifold", state.selected_tab == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
                 state.selected_tab = 0;
             }
@@ -490,7 +555,7 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
                 ImGui::Text("3D Sectors");
                 if (ImGui::Checkbox("Color by Sector", &state.show_sectors)) {
-                    upload_frame(renderer, state, state.current_frame);
+                    upload_frame(renderer, mesh_renderer, state, state.current_frame);
                 }
                 ImGui::Text("Sectors in universe:");
                 std::set<std::string> sectors_seen;
@@ -725,6 +790,11 @@ int main(int argc, char** argv) {
             gm::view::Mat4 projection = gm::view::mat4_perspective(0.9f, aspect, 0.01f, 1000.0f);
             gm::view::Mat4 view = state.camera.view_matrix();
             gm::view::Mat4 mvp = gm::view::mat4_multiply(projection, view);
+            // Surface first, points second: the points are the subject and
+            // must win the depth test against the envelope around them.
+            if (state.show_surface) {
+                mesh_renderer.draw(mvp, 0.24f, 0.85f, 0.36f, 0.28f);
+            }
             renderer.draw(mvp, 8.0f);
         }
 

@@ -7,6 +7,7 @@
 // graph this project doesn't otherwise need.
 
 #include <gm-core/error.hpp>
+#include <gm-io/mesh.hpp>
 
 #include <cstdint>
 #include <string>
@@ -53,6 +54,52 @@ private:
     std::uint32_t mvp_uniform_loc_ = 0;
     std::uint32_t point_size_uniform_loc_ = 0;
     std::size_t vertex_count_ = 0;
+};
+
+/// Owns one VAO/VBO/EBO for rendering a boundary surface (ADR-011's
+/// "lumpy non-convex surface") as a wireframe around the point cloud.
+///
+/// Wireframe rather than a shaded solid, deliberately: the points this
+/// surface encloses are the whole subject, and a filled envelope hides
+/// every one of them. Drawn via glPolygonMode(GL_LINE) over the triangle
+/// index buffer rather than by building a separate edge buffer - the
+/// same triangles, one draw call, and no second representation of the
+/// mesh that could drift out of step with the first.
+class MeshRenderer {
+public:
+    [[nodiscard]] static Result<MeshRenderer> create();
+    ~MeshRenderer();
+
+    MeshRenderer(const MeshRenderer&) = delete;
+    MeshRenderer& operator=(const MeshRenderer&) = delete;
+    MeshRenderer(MeshRenderer&& other) noexcept;
+    MeshRenderer& operator=(MeshRenderer&& other) noexcept;
+
+    /// Uploads `mesh`, converting its float64 vertices to float32 for the
+    /// GPU. The narrowing is a rendering concern only - the artifact on
+    /// disk stays float64 (see gm-io/mesh.hpp).
+    void upload(const gm::io::MeshData& mesh);
+
+    /// Drops any uploaded geometry, so a frame with no surface on disk
+    /// draws nothing rather than leaving the previous frame's surface on
+    /// screen - which would be a quietly misleading picture.
+    void clear();
+
+    [[nodiscard]] bool empty() const noexcept { return index_count_ == 0; }
+
+    void draw(const Mat4& mvp, float r, float g, float b, float a) const;
+
+private:
+    MeshRenderer() = default;
+    void release();
+
+    std::uint32_t program_ = 0;
+    std::uint32_t vao_ = 0;
+    std::uint32_t vbo_ = 0;
+    std::uint32_t ebo_ = 0;
+    std::uint32_t mvp_uniform_loc_ = 0;
+    std::uint32_t color_uniform_loc_ = 0;
+    std::size_t index_count_ = 0;
 };
 
 } // namespace gm::view
