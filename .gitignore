@@ -29,3 +29,7 @@ CMakeUserPresets.json
 CMakeCache.txt
 CMakeFiles/
 Testing/
+
+# ImGui writes its window layout beside the working directory it is run
+# from; it is per-developer UI state, not project configuration.
+imgui.ini
