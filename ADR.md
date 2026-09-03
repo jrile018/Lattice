@@ -212,6 +212,8 @@ Each stage: reads one TOML config + upstream artifacts, validates schema version
 | **B — Self** | One equity's trailing history | "Is this name outside *its own* normal range?" | Per-name normality with an honest base rate |
 | **C — Peer-relative** | Equity-vs-peer-basket spread | "Has the tradable residual stretched?" | The actual trade signal |
 
+**Amended by ADR-022.** A fourth view was added later: **D - Valuation self**, the same per-equity trailing-history fit as View B but over point-in-time valuation yields rather than embedding coordinates. It shares this ADR's premise exactly - it is another fit over the one shared feature store, not a second pipeline - which is why it cost a view rather than a stage.
+
 **Consequences.** Marginal cost of all three over any one ≈ 15%. Cross-validation for free: a signal confirmed by B and C while A shows a stable (non-tearing) shape is materially higher-confidence than any single view.
 
 ---
@@ -236,7 +238,9 @@ A tested in-house **NYSE trading calendar** (holidays + half-days, 2010→presen
 
 **Rejected.** UMAP/t-SNE (stochastic, globally distorting, frame-unstable — and no C++ implementation worth trusting for scored output).
 
----### ADR-011 — Boundary estimators: robust Mahalanobis + kernel level set, always both
+---
+
+### ADR-011 — Boundary estimators: robust Mahalanobis + kernel level set, always both
 
 **Context.** An ellipsoid is interpretable but convex-only; a kernel boundary is shape-flexible but statistically mute. In C++ neither arrives for free.
 
@@ -342,6 +346,42 @@ If excursions do not revert materially better than the unconditional base rate, 
 
 ---
 
+### ADR-022 — Relative valuation as a second geometry per equity (View D)
+
+**Context.** Every coordinate in this system is derived from price co-movement. That makes two economically opposite situations look identical: a name can sit far from its usual place in the embedding because it got *cheap*, or because the business is *deteriorating*. Price geometry cannot distinguish them, and that distinction is exactly what ADR-013's reversion gate turns on — a divergence that reverts and one that keeps going are the same shape until something non-price is measured. §6.3's feature vector contains no valuation content at all.
+
+**Decision.** Give every equity a **second geometric figure**, in valuation space, fitted with the same estimator as View B. Four commitments:
+
+**1. The coordinates are yields, not multiples.** The three axes are earnings yield `E/P`, `EBITDA/EV`, and free-cash-flow yield `FCF/P`. Inverted deliberately. `P/E` diverges as `E → 0` and flips sign across zero earnings, which puts an unbounded, sign-flipping coordinate into a covariance estimate — the same near-degeneracy the FastMCD conditioning work (ADR-011) was about. `E/P` passes smoothly through zero and stays bounded. The fix belongs in the choice of coordinate, not in the estimator that has to swallow it.
+
+**2. The figure is per-equity and self-referential — View D, the valuation analogue of View B.** Fit to that ticker's own trailing `L` days (default 756, matching View B) of `(E/P, EBITDA/EV, FCF/P)`, strictly causal. Depth answers "how cheap is this name *relative to its own history*", not "relative to the market". The cross-sectional analogue — a valuation View A — is deliberately **not** decided here; see Consequences.
+
+**3. The numerators step, the denominators move daily.** Fundamentals restate four times a year; price and enterprise value move every session. So the valuation point moves *every day*, and a 756-day window holds 756 distinct points rather than 12 — which is what makes a robust ellipsoid a meaningful object over it at all. Known artifact: each earnings release puts a step in the cloud, so it carries roughly twelve shelves per window. That is a measurable property of the data, not a defect to suppress; whether the shelving distorts the ellipsoid enough to matter is an empirical question (§12).
+
+**4. It is a new view, not a tenth stage.** View D lives inside `gm-boundaries`. It is the same *kind* of object as View B — a robust ellipsoid over one ticker's trailing cloud — so it reuses the same FastMCD call path and the same `scores.parquet` schema with a new `view` value. A separate executable would duplicate the fitting machinery to gain nothing. `gm-run`'s stage list is unchanged and ADR-006's partial-re-run property is preserved: changing a valuation parameter re-executes `gm-features` onward.
+
+**Data flow.** Five touch points, in stage order:
+
+| Stage | Change |
+|---|---|
+| `gm-ingest` | New `fundamentals.parquet`. Every row carries **two** dates: `period_end` (the fiscal period the figures describe) and `available_date` (the date they were published). |
+| `gm-features` | `features.parquet` gains the three yield columns, computed as-of `D` under the rule below. |
+| `gm-boundaries` | `scores.parquet` gains `view = "D"` rows. Same columns, same estimator. |
+| `gm-signals` | A new optional condition (§6.5 condition 6). |
+| `gm-view` | Renders both figures per equity. |
+
+**Point-in-time is the load-bearing constraint, not a detail.** Any computation simulating day `D` may read only fundamentals rows where `available_date <= D`, per the rule documented in README.md. Until a paid point-in-time source exists, `available_date` is *estimated* — SEC filing dates from the Submissions API where retrievable, otherwise `period_end` plus a conservative lag — the manifest records `fundamentals_availability = "estimated" | "reported"`, and **no View D output may promote a trade while that flag reads `"estimated"`**. It is a research view until the data is right. This is the same phase-5 spend ADR-016 makes contingent on the gate.
+
+**Consequences.**
+
+- Marginal cost is small: one more per-ticker-per-day FastMCD fit, on an existing code path, over a cheaper coordinate space than the embedding.
+- It is the **first non-price information in the system**. That is the point, and it is also the risk: everything about its value depends on data this project does not yet own.
+- What it does not buy: a cross-sectional valuation geometry. Comparing yields *across* names requires a sector-normalization decision (a software company's steady-state `E/P` is not a utility's), and making that decision badly would produce a figure that looks informative and encodes only industry membership. Deferred until View D has been measured on its own.
+- Fundamentals quality has no free two-source check. ADR-015's two-source price validation has no analogue here; SEC XBRL is authoritative but its tags are applied inconsistently across filers, so per-field coverage becomes a reported dataset statistic in the manner of ADR-016.
+- With an estimated `available_date`, any edge measured from View D is **not evidence**. This ADR is explicitly build-the-machinery-now, buy-the-data-later; the machinery is testable without the data, the conclusions are not.
+
+---
+
 ## 6. Mathematical specification
 
 Unchanged in substance from the original design; restated with implementation bindings.
@@ -369,6 +409,7 @@ Mantegna metric `d_ij = sqrt(2(1−ρ_ij))` ∈ [0, 2]. Classical MDS on `D(t)` 
 | Peer-relative | Spread z; spread velocity; OU half-life |
 | Flow *(ph. 4)* | ETF co-membership centrality; short-interest percentile |
 | Topological *(ph. 3)* | H0/H1 persistence summaries |
+| Valuation | Earnings yield `E/P`; `EBITDA/EV`; free-cash-flow yield `FCF/P` (ADR-022 — point-in-time, and **not** cross-sectionally standardized; see §6.6) |
 
 Cross-sectionally standardized per day (MAD-based) before any boundary fit.
 
@@ -384,11 +425,28 @@ Cross-sectionally standardized per day (MAD-based) before any boundary fit.
 2. View B: outside its own surface — unusual *for this name*, not merely cross-sectionally;
 3. View A: structural change metric below veto threshold (the shape is not tearing);
 4. No scheduled earnings inside the expected holding horizon;
-5. Liquidity/borrow feasibility on every leg.
+5. Liquidity/borrow feasibility on every leg;
+6. *(ADR-022, OFF by default)* View D: the cheap leg is also cheap against its own valuation history. Separates "diverged because it got cheap" from "diverged because the business is deteriorating". Cannot be enabled while the run manifest reports `fundamentals_availability = "estimated"`.
 
 Exit: `|z| < z_exit` (default 0.5), or horizon stop at 3× half-life, or hard adverse-excursion stop.
 
 ---
+
+### 6.6 Valuation geometry (View D)
+
+Fundamentals are a two-date table: `period_end` is the fiscal period the figures describe, `available_date` is when they were published. For a simulated day `D` and ticker `i`, let `F(i, D)` be the row with the greatest `period_end` among those satisfying `available_date <= D`. Rows are never read by `period_end` alone.
+
+Valuation coordinates, all inverted so they stay bounded and sign-continuous through zero:
+
+```
+v(i, D) = ( E(i,D) / P(i,D),  EBITDA(i,D) / EV(i,D),  FCF(i,D) / P(i,D) )
+```
+
+with numerators from `F(i, D)` and denominators from day `D`'s price and enterprise value, so `v` moves every session even though `F` steps quarterly. `EV = market cap + total debt − cash & equivalents`, all balance-sheet terms from `F(i, D)`.
+
+View D is then View B's construction on `v` instead of on `Ỹ(t)[i]`: per equity, FastMCD (ADR-011) over the trailing `L = 756` days of `v(i, ·)`, strictly causal, scored as signed normalized boundary distance with a chi-squared p-value. Depth is *cheapness relative to this name's own valuation history* — negative inside its normal range, positive outside it.
+
+Unlike §6.3's feature vector, `v` is **not** cross-sectionally standardized. Standardizing it across names would convert it into a statement about industry membership (see ADR-022, Consequences).
 
 ## 7. Data sources (all phase-1 needs are free)
 
@@ -588,6 +646,8 @@ Performance contract: < 1 ms frame decode from the mapped run directory; 60 fps 
 4. Short-side borrow feasibility — footnote in phase 1; becomes a constraint if the book is short-biased.
 5. Market-mode removal for View C — help or hurt? Both `C*` and `C_res` retained until settled.
 6. MSVC↔GCC bit-reproducibility — same platform reproduces bit-identically (guaranteed); cross-platform is tolerance-based; goldens are per-platform if needed.
+7. Quarterly shelving in View D — each earnings release steps the valuation cloud, giving it roughly twelve shelves per 756-day window. Does that distort the robust ellipsoid enough to matter, and if so is the answer a longer window, a shelf-aware weighting, or nothing? Measure before deciding (ADR-022).
+8. Cross-sectional valuation geometry — a valuation View A needs a sector normalization that ADR-022 deliberately does not choose. Revisit once View D has been measured on its own.
 
 ---
 
