@@ -107,12 +107,37 @@ using numbers no participant could have seen until May. Across fifteen
 years that produces a strategy that appears to work and cannot be
 traded.
 
-**Estimated availability is labelled as such.** Free fundamental data
-sources record `period_end` but generally not `available_date`. Where
+**Estimated availability is labelled as such.** Many free fundamental data
+sources record `period_end` but not `available_date`. Where
 `available_date` has to be estimated (a deliberately pessimistic lag
 after `period_end` rather than an optimistic one), the run manifest
 records `fundamentals_availability = "estimated"`. A run built on real
 publication dates records `"reported"`.
+
+**SEC XBRL is the exception, and it is the source this project uses.**
+Every fact in `data.sec.gov/api/xbrl/companyfacts/CIK##########.json`
+carries a `filed` field — the actual EDGAR submission date of the filing
+that reported it:
+
+```json
+{"start":"2022-09-25","end":"2023-09-30","val":96995000000,
+ "accn":"0000320193-23-000106","form":"10-K","filed":"2023-11-03"}
+```
+
+So `available_date` here is **measured, not estimated**, and a run built
+on it records `"reported"`. `filed` also errs in the safe direction:
+companies press-release earnings days to weeks before the 10-Q reaches
+EDGAR, so a backtest using `filed` sees the numbers slightly *later* than
+the market did — the pessimistic side, which is the side to be on.
+
+Two caveats that keep this honest. XBRL was phased in from 2009 for large
+filers, so the earliest years of ADR-002's 2010 start need a per-issuer
+coverage check rather than an assumption — that check is a reported
+dataset statistic, not something to take on trust. And a company reports
+the *same* period many times, in its own filing and again as a
+comparative in later ones; the reader keeps every one of those vintages,
+because collapsing them to the newest is look-ahead bias wearing the
+costume of deduplication.
 
 That flag exists so the distinction survives contact with time. Six
 months after a run, nobody remembers which numbers were solid;

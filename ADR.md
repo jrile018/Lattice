@@ -300,6 +300,8 @@ If excursions do not revert materially better than the unconditional base rate, 
 
 **Decision.** Point-in-time index membership is reconstructed from published index-change history, so names that left are included while they were in — to the extent their prices remain retrievable. Per-year retrievability coverage is a **reported dataset statistic**. Full resolution needs a paid point-in-time source (Sharadar/Norgate/CRSP) — a phase-5 spend, contingent on the gate (ADR-013) passing.
 
+**Amended (ADR-022 implementation).** That applies to *universe membership* and *delisted price history*, which remain the genuine gap. It does **not** extend to fundamentals: SEC XBRL carries real filing dates, so the fundamentals half of point-in-time discipline is already solved for free (§7.3, §6.6). The paid-source question is therefore narrower than this ADR originally implied — it is about prices and membership for names that left the index, not about knowing when a figure was published.
+
 ---
 
 ### ADR-017 — Artifacts: Parquet + JSON manifests, immutable, schema-versioned
@@ -493,7 +495,7 @@ This is the second live-fetch-contradicts-the-plan finding in the same M1 sessio
 
 | Source | Access | Cost | Notes |
 |---|---|---|---|
-| **SEC XBRL Company Facts** | `data.sec.gov/api/xbrl/companyfacts/CIK##########.json` | Free | Authoritative fundamentals; descriptive `User-Agent` header required; simdjson parses these large files comfortably. |
+| **SEC XBRL Company Facts** | `data.sec.gov/api/xbrl/companyfacts/CIK##########.json` | Free | Authoritative fundamentals; descriptive `User-Agent` header required. **Carries a `filed` date on every fact**, so `available_date` is reported rather than estimated (ADR-022, §6.6) — measured, not assumed. Note it reports no Q4: `fp` runs Q1/Q2/Q3/FY, so trailing-twelve-month figures must be constructed by roll-forward, never by summing four quarterly entries. Parsed with nlohmann/json, matching the existing SEC readers in `gm-signals` and `gm-profiles` rather than introducing simdjson for one call site. |
 | SEC Submissions | `data.sec.gov/submissions/CIK##########.json` | Free | Filing history incl. 8-K dates — **required** by ADR-013 to tag news-driven excursions. |
 | SEC Financial Statement Data Sets | Quarterly bulk ZIPs | Free | Bulk alternative to per-company calls. |
 | SIC code | In the submissions JSON | Free | Official, stable; adequate for sector coloring with the profile text. |

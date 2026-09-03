@@ -1,6 +1,7 @@
 add_library(gm-data STATIC
   src/universe.cpp
   src/liquidity.cpp
+  src/fundamentals.cpp
 )
 add_library(gm::data ALIAS gm-data)
 
