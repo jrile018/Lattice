@@ -83,7 +83,20 @@ struct FastMCDFit {
     Eigen::MatrixXd covariance;     // p x p, the robust covariance estimate
     Eigen::MatrixXd inv_covariance; // precomputed inverse for fast scoring
     int degrees_of_freedom;         // p
-    double mahalanobis_squared_at_worst_h_point;  // diagnostic: the max M-distance
+    double max_mahalanobis_squared_over_all_points;  // diagnostic: max M-distance over ALL n rows
+    // Ledoit-Wolf shrinkage intensity actually applied to this fit, in
+    // [0, 1]. Reported rather than hidden: an earlier revision applied a
+    // fixed eigenvalue floor that turned out to dominate 86.6% of real
+    // fits while presenting itself as a rare safety net, which was only
+    // discovered by an external review re-measuring the spectra. A
+    // caller can now see how much of the returned shape was estimated
+    // and how much was shrunk toward the target.
+    double shrinkage_intensity;
+    // True if the numerical backstop below the shrinkage had to engage
+    // for this fit (see kNumericalConditionCeiling in fastmcd.cpp).
+    // Expected to be rare; if it is not, that is a finding about the
+    // upstream embedding, not a detail to leave unreported.
+    bool numerical_backstop_engaged;
 };
 
 struct FastMCDScore {

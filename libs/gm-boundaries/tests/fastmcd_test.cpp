@@ -1,6 +1,17 @@
 #include <gm-boundaries/fastmcd.hpp>
+
+// Internal helpers, reachable only for testing. Needed because subset
+// generation and the RNG's acceptance arithmetic cannot be exercised
+// through the deterministic public API - the failure mode that made two
+// earlier "regression tests" untestable by construction.
+#include "fastmcd_detail.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <vector>
 
 using gm::boundaries::fit_fastmcd;
 using gm::boundaries::score_fastmcd;
@@ -195,110 +206,284 @@ TEST_CASE("FastMCD produces valid covariance matrix", "[fastmcd]") {
 // Real-data audit findings, each with a dedicated regression test so
 // they cannot silently regress again:
 
-TEST_CASE("FastMCD selects the MINIMUM determinant candidate, not the maximum",
-          "[fastmcd]") {
-    // A dumbbell: two tight clusters connected by a few bridge points.
-    // The two tight clusters are far more concentrated (much smaller
-    // determinant) than any subset spanning the bridge - so a correct
-    // (minimum-determinant) MCD fit should center on ONE of the tight
-    // clusters, not straddle the bridge. h = (n+p+1)/2 with n=24,p=2
-    // gives h=13, comfortably larger than either 10-point cluster alone
-    // but small enough that "straddle the whole thing" (a much larger
-    // determinant) is a clearly worse, and clearly different, answer.
-    Eigen::MatrixXd points(24, 2);
-    for (int i = 0; i < 10; ++i) {
-        points(i, 0) = -10.0 + 0.05 * static_cast<double>(i % 5);
-        points(i, 1) = 0.05 * static_cast<double>(i / 5);
+// ---------------------------------------------------------------------
+// Regression tests below this line each pin a SPECIFIC bug. A previous
+// revision of this file claimed exactly that and was wrong: a third
+// review rebuilt the buggy implementations and ran these tests against
+// them, and 13 of 14 passed. Two "regression tests" detected nothing at
+// all. Each test below therefore records what it discriminates, and how
+// that discrimination was checked, so the claim can be audited rather
+// than taken on faith.
+// ---------------------------------------------------------------------
+
+// Bug pinned: the estimator selected the MAXIMUM-determinant candidate.
+//
+// Two earlier attempts at this test both passed against the bug, for the
+// same underlying reason, and it is worth recording because the reason
+// is not obvious:
+//
+//   1st attempt - a SYMMETRIC dumbbell asserting |location(0)| > 5. Both
+//      lobes satisfy that, so the buggy code landed on the other lobe
+//      and still passed.
+//   2nd attempt - an ASYMMETRIC dumbbell asserting the SIGN of
+//      location(0). Also passed against the bug. Measuring the trials
+//      directly showed why: on that fixture all five trials converge to
+//      the IDENTICAL candidate (log-determinant spread exactly 0.000),
+//      so the minimum and the maximum are the same object and no
+//      selection rule can be distinguished. The assertion was fine; the
+//      fixture made it vacuous.
+//
+// A min-vs-max test is only meaningful when the trials reach genuinely
+// different fixed points. This fixture - two crossing elongated bands -
+// was measured to do that (log-determinant spread 8.40, minimum at
+// location (3.000, 0.0023), maximum at (2.510, 0.520)). The test now
+// asserts that divergence as a PRECONDITION, so if the fixture ever
+// stops discriminating it fails loudly instead of passing vacuously.
+TEST_CASE("FastMCD returns the minimum-determinant candidate, not the maximum", "[fastmcd]") {
+    const int n = 50;
+    Eigen::MatrixXd points(n, 2);
+    for (int i = 0; i < 25; ++i) { // band along x
+        double t = static_cast<double>(i) - 12.0;
+        points(i, 0) = t;
+        points(i, 1) = t * 0.02;
     }
-    for (int i = 10; i < 20; ++i) {
-        points(i, 0) = 10.0 + 0.05 * static_cast<double>((i - 10) % 5);
-        points(i, 1) = 0.05 * static_cast<double>((i - 10) / 5);
+    for (int i = 25; i < n; ++i) { // band along y, offset in x
+        double t = static_cast<double>(i - 25) - 12.0;
+        points(i, 0) = t * 0.02 + 3.0;
+        points(i, 1) = t;
     }
-    for (int i = 20; i < 24; ++i) {
-        points(i, 0) = -5.0 + 5.0 * static_cast<double>(i - 20);
-        points(i, 1) = 0.0;
+
+    auto trials = gm::boundaries::detail::trial_summaries(points);
+    REQUIRE(trials.size() >= 2);
+
+    std::size_t min_i = 0;
+    std::size_t max_i = 0;
+    for (std::size_t k = 1; k < trials.size(); ++k) {
+        if (trials[k].log_determinant < trials[min_i].log_determinant) min_i = k;
+        if (trials[k].log_determinant > trials[max_i].log_determinant) max_i = k;
     }
+
+    // PRECONDITION, not decoration: if every trial converged to the same
+    // candidate, minimum and maximum coincide and this test proves
+    // nothing about the selection rule. Fail rather than pass vacuously.
+    INFO("log-determinant spread across trials = "
+         << (trials[max_i].log_determinant - trials[min_i].log_determinant));
+    REQUIRE(trials[max_i].log_determinant - trials[min_i].log_determinant > 1e-6);
+    REQUIRE((trials[min_i].location - trials[max_i].location).norm() > 1e-3);
 
     auto fit = fit_fastmcd(points);
     REQUIRE(fit.has_value());
-    // A minimum-determinant fit centers near one of the two tight
-    // clusters (x near -10 or +10); a maximum-determinant fit (the bug
-    // this test guards against) centers near the bridge's midpoint
-    // (x near 0), since that subset has a much LARGER determinant.
-    CHECK(std::abs(fit->location(0)) > 5.0);
+
+    // Shrinkage and the consistency factor rescale the covariance but
+    // leave the location untouched, so the returned location identifies
+    // which candidate was selected.
+    double to_min = (fit->location - trials[min_i].location).norm();
+    double to_max = (fit->location - trials[max_i].location).norm();
+    INFO("distance to min-determinant candidate = " << to_min
+         << ", to max-determinant candidate = " << to_max);
+    CHECK(to_min < 1e-9);
+    CHECK(to_max > 1e-3);
 }
 
-TEST_CASE("FastMCD's 5 trials use genuinely different starting subsets",
-          "[fastmcd]") {
-    // A real-data audit found the original trial-subset generator
-    // degenerated to the identical subset for every trial (h=(n+p+1)/2
-    // is always > n/2, so an n/h-derived stride was always 1). This
-    // does not test fit_fastmcd's public API directly (the subset
-    // generator is file-local) - instead it exercises the observable
-    // consequence: on data where different starting subsets are known
-    // to converge to meaningfully different local optima (the dumbbell
-    // shape above, run repeatedly), a genuinely-diverse-trials estimator
-    // should reliably find the true minimum every time, not the same or
-    // the wrong answer with the identical result.
-    Eigen::MatrixXd points(24, 2);
-    for (int i = 0; i < 10; ++i) {
-        points(i, 0) = -10.0 + 0.05 * static_cast<double>(i % 5);
-        points(i, 1) = 0.05 * static_cast<double>(i / 5);
-    }
-    for (int i = 10; i < 20; ++i) {
-        points(i, 0) = 10.0 + 0.05 * static_cast<double>((i - 10) % 5);
-        points(i, 1) = 0.05 * static_cast<double>((i - 10) / 5);
-    }
-    for (int i = 20; i < 24; ++i) {
-        points(i, 0) = -5.0 + 5.0 * static_cast<double>(i - 20);
-        points(i, 1) = 0.0;
-    }
+TEST_CASE("FastMCD's trial subsets are genuinely different from each other", "[fastmcd]") {
+    const int n = 40;
+    const int p = 3;
+    const int h = (n + p + 1) / 2;
+    const std::uint32_t seed = 0xC0FFEEu;
 
-    for (int trial = 0; trial < 3; ++trial) {
-        auto fit = fit_fastmcd(points);
-        REQUIRE(fit.has_value());
-        CHECK(std::abs(fit->location(0)) > 5.0);
+    std::vector<std::vector<int>> subsets;
+    for (int trial = 0; trial < 5; ++trial) {
+        subsets.push_back(gm::boundaries::detail::deterministic_h_subset(n, h, trial, seed));
+    }
+    for (const auto& s : subsets) {
+        REQUIRE(static_cast<int>(s.size()) == h);
+    }
+    int identical_pairs = 0;
+    for (std::size_t i = 0; i < subsets.size(); ++i) {
+        for (std::size_t j = i + 1; j < subsets.size(); ++j) {
+            if (subsets[i] == subsets[j]) ++identical_pairs;
+        }
+    }
+    INFO("identical pairs among the 5 trials = " << identical_pairs);
+    CHECK(identical_pairs == 0);
+}
+
+// Bug pinned: the rejection sampler used `val > limit`, accepting
+// limit+1 values. limit is a multiple of bound, so limit+1 never is
+// (for bound > 1), and residue 0 gained one extra preimage per draw.
+//
+// HONEST SCOPE: this pins the acceptance-region ARITHMETIC, not the
+// loop condition itself. The residual skew at 2^32 is ~1e-7 relative,
+// which no feasible sampling test can resolve, so a statistical test
+// here would be theatre. Covering the loop condition directly would
+// require templating the routine on a narrow-range generator; that
+// refactor is not made here, and this comment records the gap rather
+// than implying coverage that does not exist.
+TEST_CASE("portable_bounded_random's acceptance region is an exact multiple of its bound", "[fastmcd]") {
+    for (std::uint32_t bound : {2u, 3u, 5u, 7u, 16u, 17u, 81u, 100u, 257u, 503u, 756u}) {
+        std::uint32_t limit = gm::boundaries::detail::portable_bounded_random_accept_limit(bound);
+        INFO("bound = " << bound << ", accept-region size = " << limit);
+        CHECK(limit % bound == 0u);
+        CHECK(limit > 0u);
     }
 }
 
-TEST_CASE("FastMCD bounds the condition number of a near-degenerate fit",
-          "[fastmcd]") {
-    // A real-data audit (2011-02-08, ticker TJX, View A) found a raw
-    // h-subset covariance with a smallest eigenvalue near machine
-    // epsilon relative to its largest - scoring a real point at
-    // depth=57594 against Mahalanobis's 17.45 on the same data, with
-    // over 99% of the squared distance coming from a single near-null
-    // eigendirection. This fixture reproduces the same shape: points
-    // nearly collinear in 3D (tiny variance in the 3rd dimension).
+// Bug pinned: NaN/Inf input returned a clean-looking SUCCESS. The
+// poisoned row's Mahalanobis distance sorted to the end of the C-step
+// re-subsetting and was quietly dropped, so NaN acted as an implicit
+// "discard this row" sentinel - which ADR-019 forbids outright. It also
+// fed NaN into two std::sort comparators, breaking strict weak ordering
+// (undefined behaviour, whether or not it happens to crash).
+TEST_CASE("FastMCD rejects non-finite input instead of silently dropping it", "[fastmcd]") {
     const int n = 20;
+    Eigen::MatrixXd base(n, 3);
+    for (int i = 0; i < n; ++i) {
+        base(i, 0) = static_cast<double>(i) - 10.0;
+        base(i, 1) = static_cast<double>((i * 13) % 9) - 4.0;
+        base(i, 2) = static_cast<double>((i * 37) % 7) - 3.0;
+    }
+    SECTION("NaN") {
+        Eigen::MatrixXd points = base;
+        points(4, 0) = std::numeric_limits<double>::quiet_NaN();
+        auto fit = fit_fastmcd(points);
+        REQUIRE_FALSE(fit.has_value());
+        CHECK(fit.error().code == gm::ErrorCode::kValidationFailure);
+    }
+    SECTION("Inf") {
+        Eigen::MatrixXd points = base;
+        points(7, 2) = std::numeric_limits<double>::infinity();
+        auto fit = fit_fastmcd(points);
+        REQUIRE_FALSE(fit.has_value());
+        CHECK(fit.error().code == gm::ErrorCode::kValidationFailure);
+    }
+}
+
+// Bug pinned: n == p+1 - the smallest input the API explicitly
+// documents as valid - made h == n, hence alpha = 1.0, hence
+// quantile(chi2, 1.0) overflow. The documented minimum ALWAYS failed,
+// with a misleading "consistency-factor computation failed" message.
+TEST_CASE("FastMCD accepts its documented minimum input of n == p+1", "[fastmcd]") {
+    const int p = 3;
+    const int n = p + 1;
+    Eigen::MatrixXd points(n, p);
+    points << 0.0, 0.0, 0.0,
+              1.0, 0.0, 0.0,
+              0.0, 1.0, 0.0,
+              0.0, 0.0, 1.0;
+    auto fit = fit_fastmcd(points);
+    INFO((fit.has_value() ? std::string("ok")
+                          : (fit.error().message + " | " + fit.error().context)));
+    REQUIRE(fit.has_value());
+    CHECK(fit->degrees_of_freedom == p);
+}
+
+// Bug pinned: the singularity guard was an ABSOLUTE 1e-12 threshold, so
+// the same cloud was accepted in one unit system and rejected as
+// "singular" in a smaller one - breaking the affine equivariance MCD is
+// defined by, and putting a silent cliff under the embedding that moves
+// if its coordinates are ever rescaled. Measured before the fix: a
+// cond-3.8 Gaussian accepted at scale 1e-5, rejected at 1e-6.
+TEST_CASE("FastMCD is invariant to the scale of its input units", "[fastmcd]") {
+    const int n = 60;
+    Eigen::MatrixXd base(n, 3);
+    for (int i = 0; i < n; ++i) {
+        double t = static_cast<double>(i);
+        base(i, 0) = std::sin(t * 0.7) * 2.0;
+        base(i, 1) = std::cos(t * 1.3) * 1.5;
+        base(i, 2) = std::sin(t * 2.1) * 0.8;
+    }
+    auto reference = fit_fastmcd(base);
+    REQUIRE(reference.has_value());
+
+    for (double scale : {1e-9, 1e-6, 1e-3, 1e3}) {
+        Eigen::MatrixXd points = base * scale;
+        auto fit = fit_fastmcd(points);
+        INFO("scale = " << scale);
+        REQUIRE(fit.has_value());
+        // Location is equivariant: rescaling the input rescales it by
+        // the same factor, so dividing it back out reproduces the
+        // unscaled fit.
+        CHECK(std::abs(fit->location(0) / scale - reference->location(0)) < 1e-6);
+    }
+}
+
+// The Ledoit-Wolf intensity must be a real, REPORTED quantity in
+// [0, 1], not a hidden constant. A previous revision applied a fixed
+// eigenvalue floor that dominated 86.6% of real fits while presenting
+// itself as a rare safety net; nothing in the returned fit revealed
+// that, which is why only an external re-measurement caught it.
+TEST_CASE("FastMCD reports its shrinkage intensity", "[fastmcd]") {
+    const int n = 60;
     Eigen::MatrixXd points(n, 3);
     for (int i = 0; i < n; ++i) {
-        double t = static_cast<double>(i) - static_cast<double>(n) / 2.0;
-        // Dimensions 0 and 1 vary independently (NOT one a multiple of
-        // the other - an earlier version of this fixture accidentally
-        // made dim 1 = 0.5*dim0, a second, unintended exactly-singular
-        // direction that made every subset genuinely rank-deficient
-        // regardless of dimension 2's treatment). Only dimension 2 is
-        // deliberately thin relative to 0 and 1.
-        points(i, 0) = t;
-        points(i, 1) = static_cast<double>((i * 13) % 9) - 4.0;
-        points(i, 2) = 0.05 * t + 0.01 * static_cast<double>((i * 37) % 7 - 3);
+        double t = static_cast<double>(i);
+        points(i, 0) = std::sin(t * 0.7) * 2.0;
+        points(i, 1) = std::cos(t * 1.3) * 1.5;
+        points(i, 2) = std::sin(t * 2.1) * 0.8;
     }
-
     auto fit = fit_fastmcd(points);
     REQUIRE(fit.has_value());
+    INFO("shrinkage intensity = " << fit->shrinkage_intensity
+         << ", backstop engaged = " << fit->numerical_backstop_engaged);
+    CHECK(fit->shrinkage_intensity >= 0.0);
+    CHECK(fit->shrinkage_intensity <= 1.0);
+    // On well-conditioned, genuinely 3-dimensional data the numerical
+    // backstop has no reason to fire.
+    CHECK_FALSE(fit->numerical_backstop_engaged);
+}
 
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(fit->covariance);
-    REQUIRE(solver.info() == Eigen::Success);
-    double condition_number = solver.eigenvalues()(2) / solver.eigenvalues()(0);
-    // Regularized by construction - must be bounded, not just checked.
-    CHECK(condition_number <= 100.0 + kTol);
+// The returned covariance and its cached inverse are rebuilt separately
+// from the same eigendecomposition, so an error in either
+// reconstruction would go unnoticed until it silently corrupted every
+// score computed from the fit.
+TEST_CASE("FastMCD's cached inverse really is the inverse of its covariance", "[fastmcd]") {
+    const int n = 50;
+    Eigen::MatrixXd points(n, 3);
+    for (int i = 0; i < n; ++i) {
+        double t = static_cast<double>(i);
+        points(i, 0) = std::sin(t * 0.9) * 3.0;
+        points(i, 1) = std::cos(t * 0.4) * 2.0 + std::sin(t * 1.7) * 0.5;
+        points(i, 2) = std::sin(t * 2.3) * 1.2;
+    }
+    auto fit = fit_fastmcd(points);
+    REQUIRE(fit.has_value());
+    Eigen::MatrixXd product = fit->covariance * fit->inv_covariance;
+    Eigen::MatrixXd identity = Eigen::MatrixXd::Identity(3, 3);
+    double max_err = (product - identity).cwiseAbs().maxCoeff();
+    INFO("max |C * C^-1 - I| = " << max_err);
+    CHECK(max_err < 1e-8);
+}
 
-    // A point that deviates ONLY along the near-null direction must not
-    // produce an astronomically large, single-axis-dominated depth.
-    Eigen::VectorXd probe(3);
-    probe << 0.0, 0.0, 1.0;
-    auto score = score_fastmcd(*fit, probe);
-    REQUIRE(score.has_value());
-    CHECK(score->distance < 50.0); // was in the thousands before this fix
+// Property test, NOT a regression test - the distinction is recorded
+// deliberately. Both the covariance and its inverse are reconstructed as
+// V*D*V^T, symmetric in exact arithmetic. A previous revision wrote
+// `M = (M + M.transpose()) / 2.0` to enforce that, which ALIASES in
+// Eigen - it reads M.transpose() while writing M coefficient by
+// coefficient, so it does not symmetrize at all.
+//
+// HONEST SCOPE: this test was checked against the aliasing bug and did
+// NOT catch it. On synthetic fixtures V*D*V^T comes back exactly
+// symmetric already, so the aliased in-place form produces an identical
+// result and there is nothing to detect. The aliasing was established
+// instead by direct measurement - a 3x3 where the in-place form differed
+// from the correct result by 1.5, and a real returned covariance with an
+// asymmetry of 2.91e-11 where correct symmetrization gives exactly 0.
+// What follows is therefore a genuine invariant worth holding, but it is
+// not evidence that the aliasing cannot return.
+TEST_CASE("FastMCD returns an exactly symmetric covariance and inverse", "[fastmcd]") {
+    const int n = 40;
+    Eigen::MatrixXd points(n, 3);
+    for (int i = 0; i < n; ++i) {
+        double t = static_cast<double>(i);
+        points(i, 0) = std::sin(t) * 5.0;
+        points(i, 1) = std::cos(t * 0.6) * 0.02; // deliberately anisotropic
+        points(i, 2) = std::sin(t * 1.9) * 2.0;
+    }
+    auto fit = fit_fastmcd(points);
+    REQUIRE(fit.has_value());
+    double cov_asym = (fit->covariance - fit->covariance.transpose()).cwiseAbs().maxCoeff();
+    double inv_asym = (fit->inv_covariance - fit->inv_covariance.transpose()).cwiseAbs().maxCoeff();
+    INFO("covariance asymmetry = " << cov_asym << ", inverse asymmetry = " << inv_asym);
+    CHECK(cov_asym == 0.0);
+    CHECK(inv_asym == 0.0);
 }
