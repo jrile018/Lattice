@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -486,4 +487,118 @@ TEST_CASE("FastMCD returns an exactly symmetric covariance and inverse", "[fastm
     INFO("covariance asymmetry = " << cov_asym << ", inverse asymmetry = " << inv_asym);
     CHECK(cov_asym == 0.0);
     CHECK(inv_asym == 0.0);
+}
+
+TEST_CASE("FastMCD recovers the SHAPE of the clean data, not just its center", "[fastmcd]") {
+    // Found by mutation testing the Hawkins-Bradu-Kass reference test:
+    // forcing the Ledoit-Wolf intensity to 1.0 - which discards the
+    // sample covariance entirely and returns a scaled identity, i.e. an
+    // estimator with NO shape information at all - passed every one of
+    // the 23 test cases in this suite. Location was covered, symmetry was
+    // covered, conditioning was covered, invariances were covered; the
+    // single most important thing the estimator produces was not.
+    //
+    // Construction: a deterministic anisotropic Gaussian core with a
+    // known covariance T, plus 20% contamination placed far off its long
+    // axis. If the returned covariance S is proportional to T (all that
+    // MCD promises - the consistency factor is a scale), then
+    // W = T^(-1/2) S T^(-1/2) is proportional to the identity and its
+    // eigenvalue ratio is 1. The ratio of W is therefore a single number
+    // measuring how much of the true shape was recovered, invariant to
+    // the arbitrary scale factor.
+    const int n_clean = 48;
+    const int n_dirty = 12;
+    const int n = n_clean + n_dirty;
+
+    // Box-Muller from raw mt19937 output. std::normal_distribution and
+    // std::shuffle are implementation-defined; mt19937's integer sequence
+    // is fixed by the standard, so doing the arithmetic here keeps this
+    // fixture identical on every platform.
+    std::mt19937 rng(20260902u);
+    auto uniform01 = [&rng]() {
+        return (static_cast<double>(rng()) + 0.5) / 4294967296.0;
+    };
+    std::vector<double> z;
+    z.reserve(static_cast<std::size_t>(2 * n_clean));
+    while (z.size() < static_cast<std::size_t>(2 * n_clean)) {
+        const double u1 = uniform01();
+        const double u2 = uniform01();
+        const double r = std::sqrt(-2.0 * std::log(u1));
+        z.push_back(r * std::cos(2.0 * 3.14159265358979323846 * u2));
+        z.push_back(r * std::sin(2.0 * 3.14159265358979323846 * u2));
+    }
+
+    // Long axis at 30 degrees, axis lengths 10 and 1 -> true covariance
+    // T = A A^T has an eigenvalue ratio of exactly 100.
+    const double theta = 30.0 * 3.14159265358979323846 / 180.0;
+    Eigen::Matrix2d rot;
+    rot << std::cos(theta), -std::sin(theta),
+           std::sin(theta),  std::cos(theta);
+    Eigen::Matrix2d scale = Eigen::Vector2d(10.0, 1.0).asDiagonal();
+    const Eigen::Matrix2d a = rot * scale;
+    const Eigen::Matrix2d truth = a * a.transpose();
+
+    Eigen::MatrixXd points(n, 2);
+    for (int i = 0; i < n_clean; ++i) {
+        Eigen::Vector2d raw(z[static_cast<std::size_t>(2 * i)], z[static_cast<std::size_t>(2 * i + 1)]);
+        points.row(i) = (a * raw).transpose();
+    }
+    // Contamination: a tight clump displaced along the SHORT axis, which
+    // is what would inflate the estimate toward isotropy if it leaked in.
+    const Eigen::Vector2d short_axis = rot.col(1);
+    for (int i = 0; i < n_dirty; ++i) {
+        const Eigen::Vector2d offset = short_axis * (40.0 + 0.3 * static_cast<double>(i));
+        points.row(n_clean + i) = offset.transpose();
+    }
+
+    auto fit = fit_fastmcd(points);
+    REQUIRE(fit.has_value());
+
+    // W = T^(-1/2) S T^(-1/2); proportional to I exactly when S is
+    // proportional to T.
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> t_solver(truth);
+    REQUIRE(t_solver.info() == Eigen::Success);
+    const Eigen::Matrix2d t_inv_sqrt =
+        t_solver.eigenvectors()
+        * t_solver.eigenvalues().cwiseInverse().cwiseSqrt().asDiagonal()
+        * t_solver.eigenvectors().transpose();
+    const Eigen::Matrix2d w = t_inv_sqrt * fit->covariance * t_inv_sqrt;
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> w_solver(w);
+    REQUIRE(w_solver.info() == Eigen::Success);
+    const double lo = w_solver.eigenvalues()(0);
+    const double hi = w_solver.eigenvalues()(1);
+    REQUIRE(lo > 0.0);
+    const double shape_error = hi / lo;
+
+    // Both reference points measured, not guessed:
+    //   correct estimator            -> 3.43  (delta = 0.047; Ledoit-Wolf
+    //                                   legitimately compresses a 100:1
+    //                                   ratio toward its target, and that
+    //                                   compression is most of this 3.43)
+    //   shrinkage intensity forced 1 -> 100.0 (a scaled identity, i.e.
+    //                                   the true ratio recovered in full
+    //                                   as pure error)
+    // The threshold sits ~3x above the correct value and ~10x below the
+    // shape-free one, so it neither pins sampling noise nor leaves room
+    // for an estimator with no shape information to slip through.
+    INFO("shape error (eigenvalue ratio of T^-1/2 S T^-1/2) = " << shape_error
+         << "; 1.0 is exact recovery, 100 is total loss of shape. delta="
+         << fit->shrinkage_intensity);
+    CHECK(shape_error < 10.0);
+
+    // The estimate must also still be anisotropic in absolute terms - a
+    // direct statement of the same thing, in the original coordinates.
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> s_solver(fit->covariance);
+    REQUIRE(s_solver.info() == Eigen::Success);
+    const double s_ratio = s_solver.eigenvalues()(1) / s_solver.eigenvalues()(0);
+    INFO("returned eigenvalue ratio = " << s_ratio << " (true ratio is 100)");
+    CHECK(s_ratio > 10.0);
+
+    // And its long axis must point along the true long axis, not across
+    // it. |cos| because eigenvector sign is arbitrary.
+    const Eigen::Vector2d est_long = s_solver.eigenvectors().col(1);
+    const double alignment = std::abs(est_long.dot(rot.col(0)));
+    INFO("|cos| between estimated and true long axis = " << alignment);
+    CHECK(alignment > 0.98);
 }
