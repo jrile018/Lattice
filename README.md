@@ -189,13 +189,18 @@ viewer now draws both — which one depends on what is being looked at:
 | **View A** | every equity on one date | the market's envelope that day |
 | **View B** | one equity across many dates | that equity's own envelope, from its trailing history |
 
-What View B's envelope *looks* like depends on how far back it reaches.
-Over ~20 trading days a name's path is still curve-like and the envelope
-is the tube people picture. Over the 756-day default it is a flattened
-slab, because across three years a name does not travel along a curve —
-it wanders and revisits, and its trailing cloud fills a region. Measured
-on real AAPL surfaces, longest:middle principal extent: **2.71** at 20
-days, **1.85** at 756. See ADR §8.3.
+What View B's envelope *looks* like depends on how far back it reaches,
+and the shape is itself a readout. Over a 21-day window it is a tube when
+the name has been trending and a blob when it has been chopping sideways
+— measured across 69 dates, about **two in three** are visibly elongated
+(median longest:middle 2.4 for AAPL). Over the 756-day default it is
+always a region, because across three years a name does not travel along
+a curve, it wanders and revisits.
+
+The surface also breaks into **disconnected lobes** when the trailing
+window genuinely occupied separate regions — AAPL around the COVID crash
+is the clear case. A single ellipsoid cannot represent that, which is why
+the KDE estimator exists alongside the Mahalanobis one. See ADR §8.3.
 
 The distinction matters because the interesting question is not "is this
 name unusual" but "unusual *compared to what*". View A answers it against

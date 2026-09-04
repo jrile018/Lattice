@@ -486,6 +486,12 @@ int main(int argc, char** argv) {
     std::string track_ticker;
     bool start_in_trajectory_mode = false;
     std::string axes_spec;
+    // Without this, a scripted screenshot always lands on the default
+    // orbit angle - which for a flat or elongated surface can be exactly
+    // edge-on, i.e. the one angle from which the shape is invisible. A
+    // verification picture taken from the only useless viewpoint is worse
+    // than no picture, because it looks like evidence.
+    std::string camera_spec;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--start-frame") {
@@ -517,6 +523,12 @@ int main(int argc, char** argv) {
             track_ticker = argv[++i];
         } else if (arg == "--trajectory") {
             start_in_trajectory_mode = true;
+        } else if (arg == "--camera") {
+            if (i + 1 >= argc) {
+                spdlog::error("gm-view: --camera requires YAW,PITCH in degrees, e.g. --camera 40,25");
+                return 1;
+            }
+            camera_spec = argv[++i];
         } else if (arg == "--axes") {
             if (i + 1 >= argc) {
                 spdlog::error("gm-view: --axes requires three comma-separated dimension indices, "
@@ -679,6 +691,23 @@ int main(int argc, char** argv) {
             }
             state.camera_initialized = false;
             upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
+
+            // Applied after upload_frame, which is what sets the distance:
+            // this overrides the ANGLE only, leaving the automatic framing
+            // it just computed intact.
+            if (!camera_spec.empty()) {
+                float yaw_deg = 0.0f, pitch_deg = 0.0f;
+                if (std::sscanf(camera_spec.c_str(), "%f,%f", &yaw_deg, &pitch_deg) != 2) {
+                    spdlog::error("gm-view: --camera needs YAW,PITCH in degrees, got '{}'",
+                                   camera_spec);
+                    return 1;
+                }
+                constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
+                state.camera.yaw = yaw_deg * kDegToRad;
+                // Same clamp orbit() applies, so a scripted angle cannot
+                // reach a pole the mouse cannot.
+                state.camera.pitch = std::clamp(pitch_deg * kDegToRad, -1.5f, 1.5f);
+            }
         }
     } else {
         spdlog::error("gm-view: failed to list runs: {}", runs.error().to_string());

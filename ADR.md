@@ -616,31 +616,52 @@ named apart on disk and the viewer picks by what is currently drawn.
 | `{date}_A.gmmesh` | every ticker present on `date` | the viewer is showing one date's whole market |
 | `{date}_B_{ticker}.gmmesh` | that ticker's own trailing `view_b_lookback_days`, **excluding `date` itself** | the viewer is following that ticker through time |
 
-**What shape View B actually comes out as depends on the lookback, and it
-is usually not a tube.** Measured on real AAPL surfaces (principal
-extents of the mesh vertices, longest:middle - the ratio that separates a
-cigar from a flattened disc; longest:shortest does not, because a pancake
-scores just as high on it):
+**What shape View B comes out as depends on the lookback, and at the §6.4
+default it is not a tube.** The measure is the mesh vertices' principal
+extents, longest:middle - the ratio that separates a cigar from a
+flattened disc. Longest:shortest does NOT separate them, because a
+pancake scores just as high on it; an earlier version of this section
+used that ratio and drew the wrong conclusion from it.
 
-| Lookback | longest:middle | middle:shortest | shape |
-|---|---|---|---|
-| 20 trading days | 2.71 | 3.67 | elongated - the tube people picture |
-| 756 trading days (ADR §6.4 default) | 1.85 | 2.13 | a flattened slab |
-| View A, same date, for comparison | 2.06 | 1.35 | - |
+At the 756-day default, one AAPL surface measured 1.85 longest:middle
+against View A's 2.06 on the same date - i.e. **less** elongated than the
+market envelope it is being contrasted with.
 
-The reason is worth stating because it is a fact about the data rather
-than about the code: over three years a name does not travel along a
-curve, it **wanders and revisits**. Its trailing cloud fills a region, so
-its envelope is a region too. Only over a short enough window does the
-path stay curve-like and the envelope become a genuine tube. At the
-§6.4 default the View B surface is no more elongated than the View A
-surface it is being contrasted with (0.90x on the longest:middle ratio).
+At a 21-day lookback, across 69 dates spanning 2010-2026 (every 60th
+exported surface):
 
-This does not make View B less useful - the question it answers ("is
-today unlike this name's own recent past") does not depend on the
-envelope being cigar-shaped. It does mean "the tube" is the wrong mental
-image at long lookbacks, and choosing `view_b_lookback_days` is choosing
-between two different questions, not just two resolutions of one.
+| Ticker | median | p25 | p75 | max | fraction >= 2.0 |
+|---|---|---|---|---|---|
+| AAPL | 2.39 | 1.85 | 3.32 | 31.4 | 68% |
+| NVDA | 2.42 | 1.95 | 3.22 | 12.4 | 70% |
+| XOM  | 2.23 | 1.68 | 2.96 | 11.6 | 65% |
+
+So roughly **two dates in three** produce a visibly elongated surface at a
+one-month lookback, and one in three does not.
+
+The reason is a fact about the data rather than about the code: a name
+does not travel along a curve, it **wanders and revisits**. Over a month
+in which it trended, the trailing cloud is nearly one-dimensional and its
+envelope is a tube. Over a month in which it chopped sideways, the cloud
+fills a region and so does the envelope. Over three years it always fills
+a region. **The elongation is therefore itself a readout** - a tube means
+the name has been moving directionally, a blob means it has been
+oscillating - which is information the scores do not separately report.
+
+Two further shapes show up and are not defects:
+
+- **Disconnected lobes.** A KDE level set has no obligation to be one
+  connected piece. Around the COVID crash AAPL's 21-day surface breaks
+  into several, because its last month genuinely occupied several
+  separate regions - pre-crash, in transit, post-crash. A single ellipsoid
+  cannot represent that at all, which is the argument for the KDE
+  estimator existing alongside the Mahalanobis one (ADR-007).
+- **A current point on or outside the boundary.** The window excludes its
+  own date, so this is the `inside` column being false, drawn.
+
+Choosing `view_b_lookback_days` is choosing between two different
+questions - "unlike its own last month" vs "unlike its own last cycle" -
+not two resolutions of one.
 
 Three properties follow from the definitions and are easy to misread as
 faults:
