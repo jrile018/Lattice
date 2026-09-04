@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -113,5 +114,48 @@ struct LoadedRun {
 };
 
 [[nodiscard]] Result<LoadedRun> load_run(const std::filesystem::path& run_dir);
+
+/// What boundary surfaces a run actually exported.
+///
+/// Built once per run rather than probed per frame, because View B's
+/// question is not "does this exact file exist" but "what is the newest
+/// surface for this ticker at or before this date" - gm-boundaries
+/// exports View B on a stride, so most dates have no mesh of their own
+/// and the answer is almost always some earlier date's.
+struct SurfaceIndex {
+    /// False for a run made without boundaries.write_meshes, which has no
+    /// surfaces/ directory at all. Distinguished from "directory exists
+    /// but holds nothing for this view", which is a different message to
+    /// the user.
+    bool directory_exists = false;
+
+    /// Dates with a View A surface - the market's envelope that day.
+    std::set<std::string> view_a_dates;
+
+    /// ticker -> the dates that ticker has a View B surface for, ascending.
+    /// ISO dates sort lexicographically, so this is directly binary-searchable.
+    std::map<std::string, std::vector<std::string>> view_b_dates;
+
+    /// boundaries.view_b_lookback_days as recorded in the stage manifest,
+    /// or 0 when it could not be read. The viewer needs it because the
+    /// tube encloses exactly that many prior days: drawing a trajectory of
+    /// some other length inside it would show a path leaving a surface it
+    /// was never fitted to, which reads as a rendering fault rather than
+    /// as the two different numbers it actually is.
+    std::int64_t view_b_lookback_days = 0;
+
+    /// The newest date at or before `date` that has a View B surface for
+    /// `ticker`, or nullopt. Never returns a LATER date: the tube is
+    /// fitted to history prior to its own date, so showing a future one
+    /// against today's points would put information on screen that was
+    /// not available then - the exact look-ahead ADR-011 forbids in the
+    /// scores, and no more acceptable in a picture.
+    [[nodiscard]] std::optional<std::string> view_b_surface_for(const std::string& ticker,
+                                                                 const std::string& date) const;
+};
+
+/// Scans `run_dir`/gm-boundaries/surfaces. A missing directory is not an
+/// error - it is the normal state of a run made without meshes.
+[[nodiscard]] SurfaceIndex index_surfaces(const std::filesystem::path& run_dir);
 
 } // namespace gm::view

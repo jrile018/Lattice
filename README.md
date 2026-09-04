@@ -163,7 +163,7 @@ ADR-013's reversion gate passes is a question about findings, not about
 code, and answering it here by implication would be exactly the kind of
 quiet overclaim the rest of this repo is written to avoid.
 
-**Test suite: 309 tests, green in both `linux-gcc-release` and
+**Test suite: 326 tests, green in both `linux-gcc-release` and
 `linux-gcc-asan`.** Every milestone below closes only on that pair (ADR.md
 §13).
 
@@ -178,6 +178,47 @@ quiet overclaim the rest of this repo is written to avoid.
 | M4 — Signals | Peer baskets, OU fitting, excursion tracking, earnings/8-K tagging, the reversion study |
 | M5 — Backtest | Walk-forward engine, cost model, Deflated Sharpe, `gm-sweep` sharding |
 | M6 — Depth | FastMCD, tear veto, remaining viewer tabs, SEC company profiles, ETF co-membership |
+
+### The two views, on screen
+
+`gm-boundaries` fits a boundary around two different things, and the
+viewer now draws both — which one depends on what is being looked at:
+
+| | The points are | The surface is |
+|---|---|---|
+| **View A** | every equity on one date | the market's envelope that day |
+| **View B** | one equity across many dates | that equity's own envelope, from its trailing history |
+
+What View B's envelope *looks* like depends on how far back it reaches.
+Over ~20 trading days a name's path is still curve-like and the envelope
+is the tube people picture. Over the 756-day default it is a flattened
+slab, because across three years a name does not travel along a curve —
+it wanders and revisits, and its trailing cloud fills a region. Measured
+on real AAPL surfaces, longest:middle principal extent: **2.71** at 20
+days, **1.85** at 756. See ADR §8.3.
+
+The distinction matters because the interesting question is not "is this
+name unusual" but "unusual *compared to what*". View A answers it against
+its peers today; View B answers it against its own recent selves.
+
+**A View B tube is fitted to history strictly before its own date.** So
+the current point can sit outside its own tube — and that is the finding,
+not a rendering fault. It is the same fact as the `inside` column being
+false, in a form you can see.
+
+Both surfaces are opt-in (`boundaries.write_meshes`), because the scores
+are the deliverable and do not depend on meshes existing. View B is
+additionally opt-in *per ticker*: 81 names x 4129 dates is roughly a third
+of a million meshes, and each is about 30x the work of a View A one. See
+ADR §8.3.
+
+The pipeline also carries **any number of embedding dimensions** end to
+end — `geometry.embedding_dims = 10` now produces a genuinely
+10-dimensional fit rather than a 3-dimensional one with a 10 in the
+manifest. Two consequences are documented where they bite: `x/y/z` are not
+comparable across a change to `embedding_dims` (Procrustes aligns in the
+full k), and above three dimensions the drawn surface is a shadow of the
+scored boundary rather than the boundary itself.
 
 ### In progress — ADR-022, the valuation geometry (View D)
 

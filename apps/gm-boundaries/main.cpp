@@ -17,13 +17,38 @@
 // gm-view - could not be produced at all, by any configuration. The flag
 // is now real. Three knobs:
 //
-//   boundaries.write_meshes      bool, default false
-//   boundaries.mesh_resolution   int,  default 32 (grid cells per axis)
-//   boundaries.mesh_frame_stride int,  default 1 (export every Nth frame)
+//   boundaries.write_meshes         bool, default false
+//   boundaries.mesh_resolution      int,  default 32 (grid cells per axis)
+//   boundaries.mesh_frame_stride    int,  default 1 (export every Nth frame)
+//   boundaries.view_b_mesh_tickers  array of ticker strings, default empty
+//   boundaries.view_b_mesh_stride   int,  default 1 (every Nth dated point)
 //
 // The stride exists because resolution and frame count multiply: a full
 // 4129-frame run at resolution 32 is thousands of files, and looking at
 // one year in the viewer does not require meshing all sixteen.
+//
+// The two views produce two different SHAPES, which is why both are
+// exported and why they are named apart on disk:
+//
+//   {date}_A.gmmesh            the market's envelope on that date -
+//                              fitted to every ticker present, so it is a
+//                              blob enclosing the cross-section.
+//   {date}_B_{ticker}.gmmesh   ONE ticker's envelope around its own
+//                              trailing history - fitted to a path
+//                              through space, so it is a tube.
+//
+// View B meshes are opt-in per ticker rather than for all of them,
+// because they multiply by ticker as well as by date: 81 names x 4129
+// dates is roughly a third of a million files, which is not a default
+// anyone wants. Naming the handful being looked at costs nothing and
+// makes the size of the output predictable from the config alone.
+//
+// One property of the View B tube is easy to misread and worth stating
+// where it is produced: its training window is strictly PRIOR history,
+// excluding the very date it is named for (ADR-011's causality rule). So
+// the current point legitimately can, and when something interesting is
+// happening does, sit OUTSIDE its own tube. That is the finding, not a
+// rendering fault.
 
 #include <gm-boundaries/kde.hpp>
 #include <gm-boundaries/mahalanobis.hpp>
@@ -171,17 +196,22 @@ struct ScoreRows {
     }
 };
 
-/// Extracts one frame's View A boundary surface and writes it as a
-/// .gmmesh, so gm-view has an envelope to draw around the point cloud
-/// rather than only the points.
+/// Extracts a boundary surface from `training` and writes it as a
+/// .gmmesh at `out_path`, so gm-view has an envelope to draw around the
+/// point cloud rather than only the points.
 ///
 /// The isosurface is the KDE level set: the same `level` the scores are
 /// computed against, so the drawn surface is literally the boundary the
 /// "inside/outside" column refers to, not a separate cosmetic shape that
 /// could drift away from it.
-gm::VoidResult export_frame_mesh(const Eigen::MatrixXd& training, const std::string& date,
-                                  const std::filesystem::path& surfaces_dir, double alpha,
-                                  int resolution) {
+///
+/// View-agnostic on purpose. A View A frame and a View B trailing window
+/// are both just "a set of points to enclose", and giving each its own
+/// copy of this would let the two surfaces drift apart in exactly the way
+/// the paragraph above promises they will not.
+gm::VoidResult export_boundary_mesh(const Eigen::MatrixXd& training,
+                                     const std::filesystem::path& out_path, double alpha,
+                                     int resolution) {
     // A drawable surface is three-dimensional by definition, so when the
     // embedding has more dimensions than that this fits the FIRST THREE
     // only. Those are the dominant MDS axes (classical MDS returns axes in
@@ -232,7 +262,69 @@ gm::VoidResult export_frame_mesh(const Eigen::MatrixXd& training, const std::str
     gm::io::MeshData out;
     out.vertices = mesh->vertices;
     out.triangles = mesh->triangles;
-    return gm::io::write_gmmesh(out, surfaces_dir / (date + "_A.gmmesh"));
+    return gm::io::write_gmmesh(out, out_path);
+}
+
+/// Counters for one view's mesh export, so a run that quietly produced
+/// nothing is distinguishable from one that had nothing to produce.
+struct MeshCounters {
+    std::int64_t written = 0;
+    std::int64_t failures = 0;
+    std::string first_error;
+
+    void record(const gm::VoidResult& result, const std::string& what) {
+        if (result) {
+            ++written;
+        } else {
+            ++failures;
+            if (first_error.empty()) first_error = what + ": " + result.error().message;
+        }
+    }
+};
+
+/// The tickers named in boundaries.view_b_mesh_tickers.
+///
+/// Returns an error rather than an empty set when the key holds anything
+/// that is not an array of strings. A misspelled or mistyped entry here
+/// would otherwise export zero surfaces and report success, which is the
+/// precise shape of bug the counters in this stage exist to prevent -
+/// and it would be discovered only by someone opening the viewer and
+/// finding no tube.
+gm::Result<std::set<std::string>> read_view_b_mesh_tickers(const gm::Config& config) {
+    std::set<std::string> wanted;
+    const auto* boundaries = config.raw()["boundaries"].as_table();
+    if (boundaries == nullptr) return wanted;
+    const auto* node = boundaries->get("view_b_mesh_tickers");
+    if (node == nullptr) return wanted;
+    const auto* array = node->as_array();
+    if (array == nullptr) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kInvalidArgument,
+            "boundaries.view_b_mesh_tickers must be an array of ticker strings",
+            "e.g. view_b_mesh_tickers = [\"AAPL\", \"MSFT\"]"));
+    }
+    for (const auto& element : *array) {
+        const auto* value = element.as_string();
+        if (value == nullptr) {
+            return tl::unexpected(gm::Error::make(
+                gm::ErrorCode::kInvalidArgument,
+                "boundaries.view_b_mesh_tickers contains a non-string entry",
+                "every element must be a ticker symbol in quotes"));
+        }
+        const std::string ticker = value->get();
+        // A ticker is going into a filename. No real symbol contains a
+        // path separator, but a config typo that did would write outside
+        // surfaces/ - refuse rather than resolve it.
+        if (ticker.empty() || ticker.find('/') != std::string::npos ||
+            ticker.find('\\') != std::string::npos || ticker == "." || ticker == "..") {
+            return tl::unexpected(gm::Error::make(gm::ErrorCode::kInvalidArgument,
+                                                   "boundaries.view_b_mesh_tickers entry is not a "
+                                                   "usable ticker symbol",
+                                                   ticker));
+        }
+        wanted.insert(ticker);
+    }
+    return wanted;
 }
 
 void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, const Eigen::VectorXd& query,
@@ -287,6 +379,9 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     const bool write_meshes = config.get_bool_or("boundaries.write_meshes", false);
     const std::int64_t mesh_resolution = config.get_int_or("boundaries.mesh_resolution", 32);
     const std::int64_t mesh_frame_stride = config.get_int_or("boundaries.mesh_frame_stride", 1);
+    const std::int64_t view_b_mesh_stride = config.get_int_or("boundaries.view_b_mesh_stride", 1);
+    auto view_b_mesh_tickers = read_view_b_mesh_tickers(config);
+    if (!view_b_mesh_tickers) return tl::unexpected(view_b_mesh_tickers.error());
     if (write_meshes && (mesh_resolution < 1 || mesh_resolution > 512)) {
         return tl::unexpected(gm::Error::make(
             gm::ErrorCode::kInvalidArgument,
@@ -298,6 +393,21 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
                                                "boundaries.mesh_frame_stride must be at least 1",
                                                std::to_string(mesh_frame_stride)));
     }
+    if (write_meshes && view_b_mesh_stride < 1) {
+        return tl::unexpected(gm::Error::make(gm::ErrorCode::kInvalidArgument,
+                                               "boundaries.view_b_mesh_stride must be at least 1",
+                                               std::to_string(view_b_mesh_stride)));
+    }
+    if (!write_meshes && !view_b_mesh_tickers->empty()) {
+        // Naming tickers to mesh and leaving the master switch off is a
+        // config that asks for surfaces and silently gets none. Say so
+        // instead of running for twenty minutes and producing an empty
+        // surfaces directory.
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kInvalidArgument,
+            "boundaries.view_b_mesh_tickers is set but boundaries.write_meshes is false",
+            "set write_meshes = true, or remove view_b_mesh_tickers"));
+    }
 
     std::filesystem::path geometry_dir = output_dir.parent_path() / "gm-geometry";
     auto geometry = gm::io::read_parquet(geometry_dir / "geometry.parquet");
@@ -307,9 +417,27 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     if (!loaded) return tl::unexpected(loaded.error());
     auto& [by_ticker, by_date] = *loaded;
 
+    // Checked here rather than at the View B loop it feeds, because that
+    // loop runs after View A has scored every frame: a misspelled symbol
+    // would otherwise fail the run ten minutes in, having already done all
+    // the work it was going to throw away. A ticker can be absent for dull
+    // reasons (delisted before the window, wrong share class) and for
+    // interesting ones, but either way the run should say so immediately.
+    const std::set<std::string>& view_b_wanted = *view_b_mesh_tickers;
+    for (const auto& wanted : view_b_wanted) {
+        if (by_ticker.find(wanted) == by_ticker.end()) {
+            return tl::unexpected(gm::Error::make(
+                gm::ErrorCode::kValidationFailure,
+                "boundaries.view_b_mesh_tickers names a ticker absent from this run's geometry",
+                wanted));
+        }
+    }
+
     ScoreRows rows;
     std::int64_t view_a_frames_scored = 0, view_b_points_scored = 0;
-    std::int64_t meshes_written = 0, mesh_failures = 0, frame_index = 0;
+    MeshCounters view_a_meshes;
+    MeshCounters view_b_meshes;
+    std::int64_t frame_index = 0;
     // How many dimensions the fits actually used, discovered from the
     // artifact rather than assumed, and published so a reader never has to
     // infer it (this stage having silently been 3-D regardless of config is
@@ -321,8 +449,6 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
             break;
         }
     }
-    std::string first_mesh_error;
-
     // View A: per frame, fit to every ticker present that frame, score
     // every ticker in that same frame against its own frame's fit.
     for (const auto& [date, ticker_points] : by_date) {
@@ -341,22 +467,17 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
         if (any_scored) ++view_a_frames_scored;
 
         if (write_meshes && (frame_index % mesh_frame_stride) == 0) {
-            auto exported = export_frame_mesh(training, date, output_dir / "surfaces", alpha,
-                                               static_cast<int>(mesh_resolution));
-            if (exported) {
-                ++meshes_written;
-            } else {
-                // A frame whose surface cannot be extracted does not halt
-                // the stage - the scores are the deliverable and they are
-                // already computed. But a run that silently produced zero
-                // meshes while reporting success is exactly the failure
-                // this stage's other counters exist to prevent, so the
-                // count and the first message both reach the manifest.
-                ++mesh_failures;
-                if (first_mesh_error.empty()) {
-                    first_mesh_error = date + ": " + exported.error().message;
-                }
-            }
+            // A frame whose surface cannot be extracted does not halt the
+            // stage - the scores are the deliverable and they are already
+            // computed. But a run that silently produced zero meshes while
+            // reporting success is exactly the failure this stage's other
+            // counters exist to prevent, so the count and the first
+            // message both reach the manifest.
+            view_a_meshes.record(export_boundary_mesh(training,
+                                                       output_dir / "surfaces" /
+                                                           (date + "_A.gmmesh"),
+                                                       alpha, static_cast<int>(mesh_resolution)),
+                                  date);
         }
         ++frame_index;
     }
@@ -365,6 +486,10 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     // view_b_lookback_days of THAT TICKER's own prior history (never
     // including today's own point), scoring today's point against it.
     for (const auto& [ticker, history] : by_ticker) {
+        // Counted per ticker, so the stride means "every Nth dated point
+        // of THIS name" rather than drifting with whatever came before it
+        // alphabetically.
+        std::int64_t view_b_index = 0;
         for (std::size_t i = static_cast<std::size_t>(view_b_lookback); i < history.size(); ++i) {
             std::vector<FramePoint> window(history.begin() + static_cast<std::ptrdiff_t>(i - static_cast<std::size_t>(view_b_lookback)),
                                             history.begin() + static_cast<std::ptrdiff_t>(i));
@@ -374,6 +499,21 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
             std::size_t rows_before = rows.dates.size();
             score_both_estimators(rows, training, query, history[i].date, ticker, "B", alpha);
             if (rows.dates.size() > rows_before) ++view_b_points_scored;
+
+            // The tube, for the named tickers only. `training` here is the
+            // same matrix the scores above were computed from, so the
+            // surface written and the inside/outside verdict recorded are
+            // the same fit rather than two fits that happen to agree.
+            if (write_meshes && view_b_wanted.count(ticker) != 0 &&
+                (view_b_index % view_b_mesh_stride) == 0) {
+                view_b_meshes.record(
+                    export_boundary_mesh(training,
+                                          output_dir / "surfaces" /
+                                              (history[i].date + "_B_" + ticker + ".gmmesh"),
+                                          alpha, static_cast<int>(mesh_resolution)),
+                    history[i].date + " " + ticker);
+            }
+            ++view_b_index;
         }
     }
 
@@ -411,11 +551,29 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
                                  "surfaces are the first three embedding dimensions; scores use " +
                                      std::to_string(scored_dims));
         }
-        manifest.set_int("meshes_written", meshes_written);
-        manifest.set_int("mesh_failures", mesh_failures);
+        manifest.set_int("meshes_written", view_a_meshes.written);
+        manifest.set_int("mesh_failures", view_a_meshes.failures);
         manifest.set_int("mesh_resolution", mesh_resolution);
         manifest.set_int("mesh_frame_stride", mesh_frame_stride);
-        if (!first_mesh_error.empty()) manifest.set_string("mesh_first_error", first_mesh_error);
+        if (!view_a_meshes.first_error.empty()) {
+            manifest.set_string("mesh_first_error", view_a_meshes.first_error);
+        }
+        // View B's counters are reported separately from View A's, not
+        // summed into them: the two are different shapes fitted to
+        // different training sets, and one silently failing while the
+        // other succeeded would vanish inside a total.
+        manifest.set_int("view_b_meshes_written", view_b_meshes.written);
+        manifest.set_int("view_b_mesh_failures", view_b_meshes.failures);
+        manifest.set_int("view_b_mesh_stride", view_b_mesh_stride);
+        std::string wanted_list;
+        for (const auto& ticker : view_b_wanted) {
+            if (!wanted_list.empty()) wanted_list += ",";
+            wanted_list += ticker;
+        }
+        manifest.set_string("view_b_mesh_tickers", wanted_list);
+        if (!view_b_meshes.first_error.empty()) {
+            manifest.set_string("view_b_mesh_first_error", view_b_meshes.first_error);
+        }
     } else {
         manifest.set_string("mesh_export", "disabled (boundaries.write_meshes = false)");
     }

@@ -588,9 +588,14 @@ runs/2026-08-29__w60_k3_mds_rmt/
   universe.parquet     date, ticker, in_universe, dollar_volume_rank
   prices.parquet       validated adjusted OHLCV panel
   features.parquet     the feature store  (§6.3)
-  geometry.parquet     date, ticker, x, y, z, cluster_id, mst_degree
+  geometry.parquet     date, ticker, x, y, z, dim3..dim{k-1},
+                       cluster_id, mst_degree   (x/y/z ARE dims 0/1/2;
+                       columns past the third appear only when
+                       geometry.embedding_dims > 3)
   edges.parquet        date, ticker_a, ticker_b, distance, in_mst
-  surfaces/*.gmmesh    per-frame boundary meshes (versioned binary)
+  surfaces/            boundary meshes (versioned binary, §8.3)
+    {date}_A.gmmesh              View A: the market's envelope that date
+    {date}_B_{ticker}.gmmesh     View B: one ticker's own tube
   scores.parquet       date, ticker, view, estimator, depth, pvalue, inside
   excursions.parquet   ticker, start, end, peak_depth, reverted, had_earnings
   spreads.parquet      date, ticker, z, half_life, basket weights
@@ -599,6 +604,67 @@ runs/2026-08-29__w60_k3_mds_rmt/
   meta/profiles.json   per-ticker description, SIC, links (learn panel)
   report.html          gm-report output
 ```
+
+### 8.3 Surface naming and what each surface means
+
+The two boundary views of §6.4 produce two different SHAPES, and pairing
+either with the other's points would be a category error - so they are
+named apart on disk and the viewer picks by what is currently drawn.
+
+| File | Fitted to | Drawn when |
+|---|---|---|
+| `{date}_A.gmmesh` | every ticker present on `date` | the viewer is showing one date's whole market |
+| `{date}_B_{ticker}.gmmesh` | that ticker's own trailing `view_b_lookback_days`, **excluding `date` itself** | the viewer is following that ticker through time |
+
+**What shape View B actually comes out as depends on the lookback, and it
+is usually not a tube.** Measured on real AAPL surfaces (principal
+extents of the mesh vertices, longest:middle - the ratio that separates a
+cigar from a flattened disc; longest:shortest does not, because a pancake
+scores just as high on it):
+
+| Lookback | longest:middle | middle:shortest | shape |
+|---|---|---|---|
+| 20 trading days | 2.71 | 3.67 | elongated - the tube people picture |
+| 756 trading days (ADR §6.4 default) | 1.85 | 2.13 | a flattened slab |
+| View A, same date, for comparison | 2.06 | 1.35 | - |
+
+The reason is worth stating because it is a fact about the data rather
+than about the code: over three years a name does not travel along a
+curve, it **wanders and revisits**. Its trailing cloud fills a region, so
+its envelope is a region too. Only over a short enough window does the
+path stay curve-like and the envelope become a genuine tube. At the
+§6.4 default the View B surface is no more elongated than the View A
+surface it is being contrasted with (0.90x on the longest:middle ratio).
+
+This does not make View B less useful - the question it answers ("is
+today unlike this name's own recent past") does not depend on the
+envelope being cigar-shaped. It does mean "the tube" is the wrong mental
+image at long lookbacks, and choosing `view_b_lookback_days` is choosing
+between two different questions, not just two resolutions of one.
+
+Three properties follow from the definitions and are easy to misread as
+faults:
+
+1. **A View B tube's own date is not in its training set.** The current
+   point can therefore sit *outside* its own tube, and when something
+   interesting is happening it does. That is the finding, not a rendering
+   error - it is the visual form of the `inside` column being false.
+2. **View B surfaces are opt-in per ticker**
+   (`boundaries.view_b_mesh_tickers`) and exported on a stride
+   (`view_b_mesh_stride`). 81 names x 4129 dates is roughly a third of a
+   million files, which is not a default. A View B mesh is also about 30x
+   the work of a View A one at the same resolution, because it is fitted
+   to ~756 training points rather than ~81.
+3. **The viewer snaps backwards, never forwards.** Asked for a tube on a
+   date that has none, it draws the newest one at or before that date and
+   names the date it used. Snapping forward would put a surface fitted to
+   not-yet-available data on screen - the look-ahead ADR-011 forbids in
+   the scores, and no more acceptable in a picture.
+
+At `embedding_dims > 3` a surface is necessarily the first-three-dimension
+shadow of a k-dimensional fit, and is therefore **not** the boundary the
+scores refer to; the manifest records `mesh_dims` alongside
+`embedding_dims_scored` and carries a `mesh_projection_note` saying so.
 
 ---
 

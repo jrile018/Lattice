@@ -35,3 +35,21 @@ alpha = 0.05
 # ADR §6.4's default trailing-history length for View B (~3 years of
 # trading days).
 view_b_lookback_days = 756
+
+# Boundary surfaces (ADR §8.3). Off by default: the scores are the
+# analytical deliverable and do not depend on meshes existing at all,
+# and a full run's worth of them is real disk. Turn on to look at
+# anything in gm-view.
+#
+#   write_meshes           = true
+#   mesh_resolution        = 32     grid cells per axis
+#   mesh_frame_stride      = 1      View A: every Nth frame
+#   view_b_mesh_tickers    = ["AAPL", "NVDA", "XOM"]
+#   view_b_mesh_stride     = 5      View B: every Nth dated point, per name
+#
+# View B is per-ticker and strided because it multiplies twice over: 81
+# names x 4129 dates is ~334k files, and each View B mesh is roughly 30x
+# the work of a View A one (fitted to ~756 training points against ~81).
+# Naming the handful being looked at makes the output size predictable
+# from the config alone. Setting view_b_mesh_tickers without
+# write_meshes is rejected rather than silently producing nothing.

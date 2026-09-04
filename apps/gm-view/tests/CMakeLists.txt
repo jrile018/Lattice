@@ -8,6 +8,7 @@
 add_executable(gm-view-tests
   camera_test.cpp
   data_loader_test.cpp
+  surface_index_test.cpp
   ../camera.cpp
   ../data_loader.cpp
 )

@@ -23,6 +23,8 @@
 #include <limits>
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <sstream>
 #include <cstdio>
 #include <cstdlib>
@@ -61,6 +63,19 @@ struct AppState {
     // the checkbox is broken.
     bool show_surface = true;
     bool surface_available = false;
+    /// Which surfaces this run exported, scanned once when it loads.
+    gm::view::SurfaceIndex surfaces;
+    /// Half-diagonal of the currently uploaded surface's bounding box,
+    /// about the frame centroid, or 0 when no surface is drawn. Kept so
+    /// the initial camera distance can frame whichever of the points and
+    /// the surface is larger - which for a View B tube is always the
+    /// surface, by a wide margin.
+    float surface_radius = 0.0f;
+    /// What the surface currently on screen actually IS - which view, and
+    /// for View B which date it was fitted as of. Shown in the panel
+    /// rather than left implicit, because the two views produce visually
+    /// similar lumps and a reader cannot tell them apart by looking.
+    std::string surface_label;
 
     // How many embedding dimensions this run actually has, and which three
     // of them are on screen. A run written before dimensions past the third
@@ -209,29 +224,74 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, gm::view::MeshRenderer
         state.available_ticker_labels.push_back(t.c_str());
     }
 
-    // The View A boundary surface for this exact date, if the run exported
-    // one. Cleared first so a frame without a mesh shows no mesh, rather
-    // than leaving the previous frame's envelope around a different day's
-    // points - a picture that would look plausible and be wrong.
+    // The boundary surface for what is currently on screen. Cleared first
+    // so a frame without a mesh shows no mesh, rather than leaving the
+    // previous frame's envelope around a different day's points - a
+    // picture that would look plausible and be wrong.
     //
-    // Suppressed entirely in trajectory mode: the exported surfaces are
-    // View A (the market's envelope on one date), and drawing one around a
-    // single ticker's own history would be a category error - two
-    // different objects sharing a picture and implying a relationship they
-    // do not have. View B surfaces are not exported yet.
+    // WHICH surface depends on what the points are. The two views are
+    // different objects and pairing either with the other's points would
+    // be a category error:
+    //
+    //   normal mode      the points are every ticker on one date, so the
+    //                    surface is View A - the market's envelope that
+    //                    day, {date}_A.gmmesh.
+    //   trajectory mode  the points are one ticker across many dates, so
+    //                    the surface is View B - that ticker's own tube,
+    //                    {date}_B_{ticker}.gmmesh.
+    //
+    // Both are suppressed unless the axes on screen are dim0/1/2, which is
+    // the projection gm-boundaries exported; any other triple would draw a
+    // shape belonging to different axes.
     mesh_renderer.clear();
-    const bool surface_matches_subject =
-        !state.trajectory_mode && state.axis_x == 0 && state.axis_y == 1 && state.axis_z == 2;
-    if (surface_matches_subject && state.selected_run >= 0 &&
+    state.surface_label.clear();
+    state.surface_radius = 0.0f;
+    std::array<double, 3> surface_lo{};
+    std::array<double, 3> surface_hi{};
+    bool surface_bounds_valid = false;
+    const bool axes_match_export =
+        state.axis_x == 0 && state.axis_y == 1 && state.axis_z == 2;
+    if (axes_match_export && state.selected_run >= 0 &&
         static_cast<std::size_t>(state.selected_run) < state.runs.size()) {
-        const auto surface_path =
-            state.runs[static_cast<std::size_t>(state.selected_run)].run_dir /
-            "gm-boundaries" / "surfaces" / (frame.date + "_A.gmmesh");
-        if (std::filesystem::exists(surface_path)) {
+        const auto surfaces_dir =
+            state.runs[static_cast<std::size_t>(state.selected_run)].run_dir / "gm-boundaries" /
+            "surfaces";
+        std::filesystem::path surface_path;
+        std::string label;
+        if (state.trajectory_mode && !state.tracked_ticker.empty()) {
+            // Exported on a stride, so most dates have no tube of their
+            // own and the honest answer is the newest earlier one - which
+            // the label names, so a surface a few weeks stale is never
+            // mistaken for this date's.
+            if (auto as_of = state.surfaces.view_b_surface_for(state.tracked_ticker, frame.date)) {
+                surface_path = surfaces_dir / (*as_of + "_B_" + state.tracked_ticker + ".gmmesh");
+                label = "View B: " + state.tracked_ticker + "'s own envelope, as of " + *as_of;
+            }
+        } else if (!state.trajectory_mode && state.surfaces.view_a_dates.count(frame.date) != 0) {
+            surface_path = surfaces_dir / (frame.date + "_A.gmmesh");
+            label = "View A: the market's envelope on " + frame.date;
+        }
+        if (!surface_path.empty()) {
             auto mesh = gm::io::read_gmmesh(surface_path);
             if (mesh) {
+                for (const auto& v : mesh->vertices) {
+                    if (!surface_bounds_valid) {
+                        surface_lo = v;
+                        surface_hi = v;
+                        surface_bounds_valid = true;
+                        continue;
+                    }
+                    for (std::size_t k = 0; k < 3; ++k) {
+                        surface_lo[k] = std::min(surface_lo[k], v[k]);
+                        surface_hi[k] = std::max(surface_hi[k], v[k]);
+                    }
+                }
                 mesh_renderer.upload(*mesh);
+                state.surface_label = std::move(label);
             } else {
+                // Indexed but unreadable - truncated write, wrong version.
+                // Left unlabelled so the panel reports no surface rather
+                // than naming one that is not being drawn.
                 spdlog::warn("gm-view: could not read boundary surface {}: {}",
                              surface_path.string(), mesh.error().to_string());
             }
@@ -318,13 +378,38 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, gm::view::MeshRenderer
     state.camera.target_y = cy;
     state.camera.target_z = cz;
 
+    if (surface_bounds_valid) {
+        // Furthest corner of the surface's box from the centroid the
+        // camera orbits. Corners rather than the box's own half-diagonal,
+        // because the centroid is the points' centre and need not be the
+        // surface's - a trajectory ending in a sharp move sits well off
+        // the middle of its own tube.
+        for (int corner = 0; corner < 8; ++corner) {
+            const float x = static_cast<float>((corner & 1) ? surface_hi[0] : surface_lo[0]);
+            const float y = static_cast<float>((corner & 2) ? surface_hi[1] : surface_lo[1]);
+            const float z = static_cast<float>((corner & 4) ? surface_hi[2] : surface_lo[2]);
+            const float dx = x - cx, dy = y - cy, dz = z - cz;
+            state.surface_radius =
+                std::max(state.surface_radius, std::sqrt(dx * dx + dy * dy + dz * dz));
+        }
+    }
+
     if (!state.camera_initialized) {
         float max_dist = 0.1f;
         for (const auto& v : verts) {
             const float dx = v.x - cx, dy = v.y - cy, dz = v.z - cz;
             max_dist = std::max(max_dist, std::sqrt(dx * dx + dy * dy + dz * dz));
         }
-        state.camera.distance = max_dist * 3.0f;
+        for (const auto& v : highlight) {
+            const float dx = v.x - cx, dy = v.y - cy, dz = v.z - cz;
+            max_dist = std::max(max_dist, std::sqrt(dx * dx + dy * dy + dz * dz));
+        }
+        // Whichever is bigger. A View B tube is a level set sampled in a
+        // box padded by three bandwidths per axis, so it routinely extends
+        // several times further than the path it encloses; fitting to the
+        // points alone put the camera inside the surface.
+        max_dist = std::max(max_dist, state.surface_radius);
+        state.camera.distance = max_dist * 2.5f;
         state.camera_initialized = true;
     }
 }
@@ -357,12 +442,23 @@ void load_selected_run(AppState& state, gm::view::PointCloudRenderer& renderer,
     assign_sector_colors(state);
     // Whether this run has surfaces at all, decided once per run rather
     // than probed every frame.
+    state.surfaces = gm::view::SurfaceIndex{};
     state.surface_available = false;
     if (state.selected_run >= 0 &&
         static_cast<std::size_t>(state.selected_run) < state.runs.size()) {
-        state.surface_available = std::filesystem::is_directory(
-            state.runs[static_cast<std::size_t>(state.selected_run)].run_dir / "gm-boundaries" /
-            "surfaces");
+        state.surfaces = gm::view::index_surfaces(
+            state.runs[static_cast<std::size_t>(state.selected_run)].run_dir);
+        state.surface_available = state.surfaces.directory_exists;
+    }
+    // Default the trajectory length to the window the View B tubes were
+    // actually fitted to. Left at its own default, a 756-day path would be
+    // drawn inside a tube built from 60 days of history and appear to
+    // burst out of it everywhere - which looks like a broken surface and
+    // is really just two different numbers. The user can still move the
+    // slider; the panel says when it no longer matches.
+    if (state.surfaces.view_b_lookback_days > 0) {
+        state.trajectory_lookback = static_cast<int>(
+            std::clamp<std::int64_t>(state.surfaces.view_b_lookback_days, 1, 100000));
     }
     if (!state.loaded.frames.empty()) state.embedding_dims =
             state.loaded.frames.front().coords.empty()
@@ -570,13 +666,19 @@ int main(int argc, char** argv) {
                 spdlog::error("gm-view: --trajectory needs --track to say whose path to draw");
                 return 1;
             }
-            state.camera_initialized = false;
-            upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
+            // Seek BEFORE the first upload, not after. Uploading frame 0
+            // first and then jumping fitted the camera to frame 0 - which
+            // in trajectory mode holds a single point and no surface yet,
+            // since the lookback window has not filled - and left that
+            // framing in place for the frame actually asked for. The
+            // symptom was a camera sitting inside the boundary surface,
+            // looking at the inside of a wall.
             if (start_frame > 0 && !state.loaded.frames.empty()) {
                 state.current_frame =
                     std::min(start_frame, static_cast<int>(state.loaded.frames.size()) - 1);
-                upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
             }
+            state.camera_initialized = false;
+            upload_frame(renderer, mesh_renderer, highlight_renderer, state, state.current_frame);
         }
     } else {
         spdlog::error("gm-view: failed to list runs: {}", runs.error().to_string());
@@ -661,8 +763,27 @@ int main(int argc, char** argv) {
             ImGui::BeginTabBar("ViewTabs");
             if (state.surface_available) {
                 ImGui::Checkbox("Boundary surface", &state.show_surface);
-                if (state.show_surface && mesh_renderer.empty()) {
-                    ImGui::TextDisabled("no surface exported for this frame");
+                if (state.show_surface) {
+                    if (!state.surface_label.empty()) {
+                        ImGui::TextDisabled("%s", state.surface_label.c_str());
+                    } else if (state.trajectory_mode && !state.tracked_ticker.empty()) {
+                        // Distinguish "this run exported no tubes for this
+                        // name" from "it did, but not yet this early" -
+                        // they need different actions from the user and
+                        // one shared message would fit neither.
+                        if (state.surfaces.view_b_dates.count(state.tracked_ticker) == 0) {
+                            ImGui::TextDisabled("no tube for %s in this run",
+                                                state.tracked_ticker.c_str());
+                            ImGui::TextDisabled("add it to boundaries.view_b_mesh_tickers");
+                        } else {
+                            ImGui::TextDisabled("no tube yet - its first %lld days of",
+                                                static_cast<long long>(
+                                                    state.surfaces.view_b_lookback_days));
+                            ImGui::TextDisabled("history had not accumulated by this date");
+                        }
+                    } else {
+                        ImGui::TextDisabled("no surface exported for this frame");
+                    }
                 }
             } else {
                 ImGui::TextDisabled("No boundary surfaces in this run.");
@@ -727,6 +848,24 @@ int main(int argc, char** argv) {
                         }
                         ImGui::TextDisabled("%s over %d days; red is this frame",
                                             state.tracked_ticker.c_str(), state.trajectory_lookback);
+                        if (state.surfaces.view_b_lookback_days > 0 &&
+                            state.trajectory_lookback !=
+                                static_cast<int>(state.surfaces.view_b_lookback_days)) {
+                            // Said plainly, because the symptom otherwise
+                            // reads as a broken surface: a longer path than
+                            // the tube was fitted to will leave it, and a
+                            // shorter one will rattle around inside it.
+                            ImGui::TextDisabled("tube was fitted to %lld days - path and",
+                                                static_cast<long long>(
+                                                    state.surfaces.view_b_lookback_days));
+                            ImGui::TextDisabled("surface no longer cover the same window");
+                        }
+                        // The distinction that makes View B worth looking
+                        // at: the tube is built from history BEFORE its own
+                        // date, so the red point sitting outside it is the
+                        // finding, not a glitch.
+                        ImGui::TextDisabled("red outside the tube = today is unlike");
+                        ImGui::TextDisabled("its own recent past");
                     }
                 }
             }

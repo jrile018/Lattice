@@ -1,4 +1,7 @@
 #include "data_loader.hpp"
+
+#include <gm-core/manifest.hpp>
+#include <system_error>
 #include <gm-io/parquet.hpp>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
@@ -218,6 +221,67 @@ Result<LoadedRun> load_run(const std::filesystem::path& run_dir) {
     }
 
     return result;
+}
+
+
+std::optional<std::string> SurfaceIndex::view_b_surface_for(const std::string& ticker,
+                                                             const std::string& date) const {
+    const auto it = view_b_dates.find(ticker);
+    if (it == view_b_dates.end() || it->second.empty()) return std::nullopt;
+    const auto& dates = it->second;
+    // upper_bound gives the first date strictly after `date`; the one
+    // before it is the newest at or before. begin() means every exported
+    // surface for this ticker is in the future - early in the run, before
+    // its first lookback window had filled.
+    const auto after = std::upper_bound(dates.begin(), dates.end(), date);
+    if (after == dates.begin()) return std::nullopt;
+    return *std::prev(after);
+}
+
+SurfaceIndex index_surfaces(const std::filesystem::path& run_dir) {
+    SurfaceIndex index;
+    const auto surfaces_dir = run_dir / "gm-boundaries" / "surfaces";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(surfaces_dir, ec)) return index;
+    index.directory_exists = true;
+
+    // Names are "{date}_A.gmmesh" and "{date}_B_{ticker}.gmmesh". The date
+    // is a fixed-width ISO 10, so the view marker sits at a known offset
+    // and the ticker is simply the rest - which matters because two real
+    // S&P symbols (BRK.B, BF.B) contain a dot, and splitting on
+    // punctuation would mangle them.
+    static constexpr std::size_t kDateLen = 10;
+    static constexpr std::string_view kExt = ".gmmesh";
+    for (const auto& entry : std::filesystem::directory_iterator(surfaces_dir, ec)) {
+        if (!entry.is_regular_file(ec)) continue;
+        const std::string name = entry.path().filename().string();
+        if (name.size() <= kExt.size() || name.compare(name.size() - kExt.size(), kExt.size(), kExt) != 0) {
+            continue;
+        }
+        const std::string stem = name.substr(0, name.size() - kExt.size());
+        if (stem.size() == kDateLen + 2 && stem.compare(kDateLen, 2, "_A") == 0) {
+            index.view_a_dates.insert(stem.substr(0, kDateLen));
+        } else if (stem.size() > kDateLen + 3 && stem.compare(kDateLen, 3, "_B_") == 0) {
+            index.view_b_dates[stem.substr(kDateLen + 3)].push_back(stem.substr(0, kDateLen));
+        }
+        // Anything else is a file this build does not recognize. Ignored
+        // rather than rejected: a newer gm-boundaries adding a third view
+        // should not stop an older viewer from drawing the two it knows.
+    }
+    for (auto& [ticker, dates] : index.view_b_dates) {
+        // directory_iterator order is unspecified, and view_b_surface_for
+        // binary-searches these.
+        std::sort(dates.begin(), dates.end());
+    }
+
+    auto manifest = gm::Manifest::read(run_dir / "gm-boundaries" / "manifest.json");
+    if (manifest) {
+        const auto& doc = manifest->raw();
+        if (doc.contains("view_b_lookback_days") && doc["view_b_lookback_days"].is_number_integer()) {
+            index.view_b_lookback_days = doc["view_b_lookback_days"].get<std::int64_t>();
+        }
+    }
+    return index;
 }
 
 } // namespace gm::view
