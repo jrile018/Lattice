@@ -10,6 +10,8 @@
 // (tests/golden/CMakeLists.txt) so this test never hardcodes a build
 // layout.
 
+#include "run_process.hpp"
+
 #include <gm-core/manifest.hpp>
 #include <gm-io/parquet.hpp>
 
@@ -56,13 +58,6 @@ constexpr std::array<const char*, 9> kExpectedStages = {
 // pipeline's incremental rollout without a rewrite each time another
 // stage graduates.
 
-int normalized_exit_code(int system_result) {
-#if defined(_WIN32)
-    return system_result;
-#else
-    return WIFEXITED(system_result) ? WEXITSTATUS(system_result) : -1;
-#endif
-}
 
 } // namespace
 
@@ -80,7 +75,7 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
     cmd << "\"" << GM_RUN_EXECUTABLE << "\" --config \"" << fixture_config.string()
         << "\" --run-id \"" << run_id << "\"";
 
-    int exit_code = normalized_exit_code(std::system(cmd.str().c_str()));
+    int exit_code = gm::test::run_command(cmd.str());
     REQUIRE(exit_code == 0);
 
     SECTION("top-level run manifest is valid and lists all 9 stages") {
@@ -307,6 +302,6 @@ TEST_CASE("gm-run executes the full M0 stub chain and produces valid artifacts",
 TEST_CASE("gm-run fails cleanly on a nonexistent config", "[golden][m0]") {
     std::ostringstream cmd;
     cmd << "\"" << GM_RUN_EXECUTABLE << "\" --config \"does/not/exist.toml\" --run-id \"x\"";
-    int exit_code = normalized_exit_code(std::system(cmd.str().c_str()));
+    int exit_code = gm::test::run_command(cmd.str());
     CHECK(exit_code != 0);
 }

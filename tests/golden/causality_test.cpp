@@ -21,6 +21,8 @@
 // GM_BOUNDARIES_EXECUTABLE is injected by CMake so this never hardcodes a
 // build layout.
 
+#include "run_process.hpp"
+
 #include <gm-io/parquet.hpp>
 #include <gm-io/table.hpp>
 
@@ -44,14 +46,6 @@
 #endif
 
 namespace {
-
-int normalized_exit_code(int raw) {
-#if defined(_WIN32)
-    return raw;
-#else
-    return WIFEXITED(raw) ? WEXITSTATUS(raw) : -1;
-#endif
-}
 
 /// A deterministic synthetic embedding: `tickers` names over `frames` dates,
 /// each wandering on its own smooth path plus a repeatable wobble. Smooth
@@ -168,7 +162,7 @@ int run_boundaries(const std::filesystem::path& config, const std::filesystem::p
 #else
     cmd << " > NUL 2>&1";
 #endif
-    return normalized_exit_code(std::system(cmd.str().c_str()));
+    return gm::test::run_command(cmd.str());
 }
 
 } // namespace
