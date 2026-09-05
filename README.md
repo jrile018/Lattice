@@ -362,9 +362,30 @@ denominator. Between filings both numerators are constant, so the two
 coordinates are exactly proportional and every day in that quarter lies on
 one ray through the origin. A trailing window is a fan of about twelve
 such rays, and when the cash-flow-to-earnings ratio is stable across them,
-the fan collapses toward a line. The run reports the measured correlation
-between the axes for exactly this reason: a second coordinate that is a
-near-copy of the first adds columns, not information.
+the fan collapses toward a line.
+
+Measured over 200,730 windows on the full 86-ticker production run:
+
+| | |
+|---|---|
+| median \|correlation\| between the two axes | **0.73** |
+| 90th percentile | **0.988** |
+| windows above 0.99 | **19,102 (9.5%)** |
+| windows Mahalanobis and FastMCD both refuse to fit | **9,123 (4.5%)** |
+
+The refusals *are* the collinearity rather than a separate problem —
+Mahalanobis names it, reporting a near-singular covariance with points
+degenerate or collinear in some dimension. KDE, which inverts nothing,
+fits every one of them.
+
+An 11-ticker test run had put the median at 0.87 and the >0.99 share at
+17%; the production figures are lower, and overstating a finding is as
+much a fault as not measuring it. Either way the reading is the same: a
+second coordinate that is largely a copy of the first adds columns, not
+information. A genuinely independent second axis means EBITDA/EV — a
+different denominator — at 53% ticker-day coverage instead of 77%. Which
+side of that trade is right is a research question this repo has not
+answered.
 
 ### The one property everything else rests on
 

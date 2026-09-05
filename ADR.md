@@ -670,10 +670,11 @@ more vintages than capex does, and those extra anchors previously produced
 rows carrying net income and nothing else.
 
 **Measured collinearity of the two default axes.** E/P and FCF/P share a
-denominator, so between filings they are exactly proportional. Over 25806
-real windows the median absolute correlation between them is **0.87**, the
-90th percentile is **0.998**, and **17%** of windows exceed 0.99. The 754
-windows (2.9%) that Mahalanobis and FastMCD both refuse to fit ARE that
+denominator, so between filings they are exactly proportional. Over 200730
+windows on the full 86-ticker production run the median absolute
+correlation between them is **0.73**, the 90th percentile is **0.988**, and
+**9.5%** of windows exceed 0.99. The 9123
+windows (4.5%) that Mahalanobis and FastMCD both refuse to fit ARE that
 collinearity - Mahalanobis names it, reporting a near-singular covariance
 with points degenerate or collinear in some dimension. KDE, which inverts
 nothing, scores all of them. So View D on its default axes is close to a
@@ -828,7 +829,7 @@ Performance contract: < 1 ms frame decode from the mapped run directory; 60 fps 
 4. Short-side borrow feasibility — footnote in phase 1; becomes a constraint if the book is short-biased.
 5. Market-mode removal for View C — help or hurt? Both `C*` and `C_res` retained until settled.
 6. MSVC↔GCC bit-reproducibility — same platform reproduces bit-identically (guaranteed); cross-platform is tolerance-based; goldens are per-platform if needed.
-7. Quarterly shelving in View D — **measured, and it matters more than "shelving" suggested.** The shelves are not merely steps: between filings *every* numerator is constant while the shared denominator (market cap) moves, so E/P and FCF/P are exactly proportional within a quarter and each shelf is a RAY through the origin rather than a plateau. A 756-day window is a fan of about twelve such rays, and it collapses toward a line whenever the cash-flow-to-earnings ratio is stable across them. Over 25806 real windows the median absolute correlation between the two axes is 0.87, the 90th percentile 0.998, and 17% exceed 0.99; 2.9% are singular enough that Mahalanobis and FastMCD both decline to fit while KDE, which inverts nothing, does not. So the answer is not a longer window — a longer window adds more nearly-parallel rays. It is a second axis with a DIFFERENT denominator, which means EBITDA/EV, at 53% ticker-day coverage against 77%. The run publishes the correlation so the choice is made on numbers.
+7. Quarterly shelving in View D — **measured, and it matters more than "shelving" suggested.** The shelves are not merely steps: between filings *every* numerator is constant while the shared denominator (market cap) moves, so E/P and FCF/P are exactly proportional within a quarter and each shelf is a RAY through the origin rather than a plateau. A 756-day window is a fan of about twelve such rays, and it collapses toward a line whenever the cash-flow-to-earnings ratio is stable across them. Over 200730 windows on the full production run the median absolute correlation between the two axes is 0.73, the 90th percentile 0.988, and 9.5% exceed 0.99; 4.5% are singular enough that Mahalanobis and FastMCD both decline to fit while KDE, which inverts nothing, does not. So the answer is not a longer window — a longer window adds more nearly-parallel rays. It is a second axis with a DIFFERENT denominator, which means EBITDA/EV, at 53% ticker-day coverage against 77%. The run publishes the correlation so the choice is made on numbers.
 8. Cross-sectional valuation geometry — a valuation View A needs a sector normalization that ADR-022 deliberately does not choose. Revisit once View D has been measured on its own.
 
 ---
