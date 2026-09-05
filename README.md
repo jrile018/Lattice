@@ -305,11 +305,54 @@ Two further rules the chains follow, both learned from a real run:
   pipeline computes it; whether "cheap and diverging" actually separates
   from "deteriorating and diverging" in the scores is a research question
   this repo has not answered, and nothing here claims it has.
-- **XBRL coverage before ~2011 is unmeasured.** The taxonomy was phased in
-  from 2009 for large filers, so the early years of ADR-002's 2010 start
-  need a per-issuer coverage check. The run now reports how many rows read
-  an absent balance-sheet item as zero because nothing had been published
-  yet, which is the raw material for that check but is not the check.
+- **XBRL coverage does not reach the start of the price window, and now
+  that is measured rather than suspected.** Across 40 issuers, counting the
+  earliest EDGAR filing date present in `companyfacts`:
+
+  | Concept | Median first available | Issuers covered at 2010-01-04 |
+  |---|---|---|
+  | net income (E/P) | 2010-08-02 | 19/40 (48%) |
+  | operating cash flow (FCF/P) | 2010-08-02 | 19/40 (48%) |
+  | operating income (EBITDA) | 2010-11-24 | 13/40 (32%) |
+  | long-term debt (EV) | 2010-08-03 | 15/40 (38%) |
+
+  Those medians line up with the SEC's own phase-in — large filers from
+  June 2009, mid-tier June 2010, everyone June 2011 — so this is the
+  mandate schedule showing through, not a gap in the reader. The practical
+  consequence: **View D is thin before roughly mid-2011** and does not
+  become broadly available across the universe until then, while the price
+  geometry runs from 2010-01-04. Any study using both has to say which
+  window it means. `tools/xbrl_coverage_start.py` reproduces the table.
+
+### Two measured behaviours that look like bugs and are not
+
+**FastMCD declines to fit one frame at ten dimensions, and no frame at
+three.** Scoring View A alone over the identical 2010-2026 panel:
+
+| Embedding | FastMCD failures | Where |
+|---|---|---|
+| `embedding_dims = 3` | 0 | — |
+| `embedding_dims = 10` | 81 | all on **2014-04-16**, one per ticker |
+
+Same data, same estimator, same dates; only the dimension differs. At
+k=10 the h-subset is 46 points and the covariance is 10x10, and on that
+one date no subset of the frame yields a non-singular one — so the
+estimator reports "no valid candidate found across all trials" instead of
+inverting something it should not. The other two estimators score that
+frame normally, which is the disagreement ADR-007 calls a first-class
+output. The manifest now records where each estimator first failed, not
+just how often, so this took two minutes to localise rather than being
+inferred from a count.
+
+**View D's two default axes are barely two axes.** E/P is net income over
+market cap and FCF/P is free cash flow over market cap — the same
+denominator. Between filings both numerators are constant, so the two
+coordinates are exactly proportional and every day in that quarter lies on
+one ray through the origin. A trailing window is a fan of about twelve
+such rays, and when the cash-flow-to-earnings ratio is stable across them,
+the fan collapses toward a line. The run reports the measured correlation
+between the axes for exactly this reason: a second coordinate that is a
+near-copy of the first adds columns, not information.
 
 ### How the tests here are meant to be read
 

@@ -185,6 +185,19 @@ struct ScoreRows {
     std::size_t kde_failures = 0;
     std::size_t fastmcd_failures = 0;
 
+    // Where each estimator first failed, and why. A count alone says a
+    // problem exists; this says where to look. Kept as the FIRST rather
+    // than the last so it is stable across runs that differ only in how
+    // far they got.
+    std::string first_mahalanobis_failure;
+    std::string first_kde_failure;
+    std::string first_fastmcd_failure;
+
+    static std::string where(const std::string& date, const std::string& ticker, const char* view,
+                             const std::string& reason) {
+        return date + " " + view + "/" + ticker + ": " + reason;
+    }
+
     void add(const std::string& date, const std::string& ticker, const char* view,
              const char* estimator, double depth, double pvalue, bool inside) {
         dates.push_back(date);
@@ -338,9 +351,17 @@ void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, con
             rows.add(date, ticker, view, "mahalanobis", score->depth, score->p_value, score->inside);
         } else {
             ++rows.mahalanobis_failures;
+            if (rows.first_mahalanobis_failure.empty()) {
+                rows.first_mahalanobis_failure =
+                    ScoreRows::where(date, ticker, view, score.error().message);
+            }
         }
     } else {
         ++rows.mahalanobis_failures;
+        if (rows.first_mahalanobis_failure.empty()) {
+            rows.first_mahalanobis_failure =
+                ScoreRows::where(date, ticker, view, maha_fit.error().message);
+        }
     }
 
     auto kde_fit = gm::boundaries::fit_kde(training, alpha);
@@ -355,9 +376,15 @@ void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, con
                       score->inside);
         } else {
             ++rows.kde_failures;
+            if (rows.first_kde_failure.empty()) {
+                rows.first_kde_failure = ScoreRows::where(date, ticker, view, score.error().message);
+            }
         }
     } else {
         ++rows.kde_failures;
+        if (rows.first_kde_failure.empty()) {
+            rows.first_kde_failure = ScoreRows::where(date, ticker, view, kde_fit.error().message);
+        }
     }
 
     auto mcd_fit = gm::boundaries::fit_fastmcd(training);
@@ -367,9 +394,17 @@ void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, con
             rows.add(date, ticker, view, "fastmcd", score->depth, score->p_value, score->inside);
         } else {
             ++rows.fastmcd_failures;
+            if (rows.first_fastmcd_failure.empty()) {
+                rows.first_fastmcd_failure =
+                    ScoreRows::where(date, ticker, view, score.error().message);
+            }
         }
     } else {
         ++rows.fastmcd_failures;
+        if (rows.first_fastmcd_failure.empty()) {
+            rows.first_fastmcd_failure =
+                ScoreRows::where(date, ticker, view, mcd_fit.error().message);
+        }
     }
 }
 
@@ -615,6 +650,24 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
             "set write_meshes = true, or remove view_b_mesh_tickers"));
     }
 
+    // Which views to score. Defaults to all of them; exists so that
+    // investigating one view does not cost the other two. A View A question
+    // takes about two minutes to answer and about twenty if View B has to be
+    // recomputed on the way past, and that difference decides whether the
+    // question gets asked at all.
+    const std::string views = config.get_string_or("boundaries.views", "ABD");
+    for (char c : views) {
+        if (c != 'A' && c != 'B' && c != 'D') {
+            return tl::unexpected(gm::Error::make(
+                gm::ErrorCode::kInvalidArgument,
+                "boundaries.views may contain only the letters A, B and D",
+                views));
+        }
+    }
+    const bool score_a = views.find('A') != std::string::npos;
+    const bool score_b = views.find('B') != std::string::npos;
+    const bool score_d = views.find('D') != std::string::npos;
+
     std::filesystem::path geometry_dir = output_dir.parent_path() / "gm-geometry";
     auto geometry = gm::io::read_parquet(geometry_dir / "geometry.parquet");
     if (!geometry) return tl::unexpected(geometry.error());
@@ -629,6 +682,7 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     // the work it was going to throw away. A ticker can be absent for dull
     // reasons (delisted before the window, wrong share class) and for
     // interesting ones, but either way the run should say so immediately.
+    if (!score_b) view_b_lookback = std::numeric_limits<std::int64_t>::max();
     const std::set<std::string>& view_b_wanted = *view_b_mesh_tickers;
     for (const auto& wanted : view_b_wanted) {
         if (by_ticker.find(wanted) == by_ticker.end()) {
@@ -658,17 +712,20 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     // View A: per frame, fit to every ticker present that frame, score
     // every ticker in that same frame against its own frame's fit.
     for (const auto& [date, ticker_points] : by_date) {
+        if (!score_a && !write_meshes) break;
         std::vector<FramePoint> frame_points;
         frame_points.reserve(ticker_points.size());
         for (const auto& [ticker, fp] : ticker_points) frame_points.push_back(fp);
         Eigen::MatrixXd training = points_to_matrix(frame_points);
 
         bool any_scored = false;
-        for (const auto& [ticker, fp] : ticker_points) {
-            Eigen::VectorXd query = point_to_vector(fp);
-            std::size_t rows_before = rows.dates.size();
-            score_both_estimators(rows, training, query, date, ticker, "A", alpha);
-            if (rows.dates.size() > rows_before) any_scored = true;
+        if (score_a) {
+            for (const auto& [ticker, fp] : ticker_points) {
+                Eigen::VectorXd query = point_to_vector(fp);
+                std::size_t rows_before = rows.dates.size();
+                score_both_estimators(rows, training, query, date, ticker, "A", alpha);
+                if (rows.dates.size() > rows_before) any_scored = true;
+            }
         }
         if (any_scored) ++view_a_frames_scored;
 
@@ -727,8 +784,14 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     // embedding space (ADR-022). Scored into the same table under view "D",
     // because a consumer comparing "unusual in price geometry" against
     // "unusual in valuation" wants one table, not two.
-    if (auto r = score_view_d(config, output_dir, rows, manifest, alpha, view_b_lookback); !r) {
-        return tl::unexpected(r.error());
+    if (score_d) {
+        if (auto r = score_view_d(config, output_dir, rows, manifest, alpha,
+                                   config.get_int_or("boundaries.view_b_lookback_days", 60));
+            !r) {
+            return tl::unexpected(r.error());
+        }
+    } else {
+        manifest.set_string("view_d", "skipped (boundaries.views excludes D)");
     }
 
     // Read out before the vectors below are moved-from into the Table -
@@ -738,6 +801,9 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     std::size_t mahalanobis_failures = rows.mahalanobis_failures;
     std::size_t kde_failures = rows.kde_failures;
     std::size_t fastmcd_failures = rows.fastmcd_failures;
+    std::string first_mahalanobis_failure = rows.first_mahalanobis_failure;
+    std::string first_kde_failure = rows.first_kde_failure;
+    std::string first_fastmcd_failure = rows.first_fastmcd_failure;
 
     gm::io::Table scores;
     if (auto r = scores.add_string_column("date", std::move(rows.dates)); !r) return tl::unexpected(r.error());
@@ -753,6 +819,7 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
 
     manifest.set_int("rows_written", static_cast<std::int64_t>(scores.num_rows()));
     manifest.set_int("embedding_dims_scored", static_cast<std::int64_t>(scored_dims));
+    manifest.set_string("views_scored", views);
     manifest.set_int("view_a_frames_scored", view_a_frames_scored);
     manifest.set_int("view_b_points_scored", view_b_points_scored);
     manifest.set_double("alpha", alpha);
@@ -799,6 +866,13 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
     manifest.set_int("mahalanobis_failures", static_cast<std::int64_t>(mahalanobis_failures));
     manifest.set_int("kde_failures", static_cast<std::int64_t>(kde_failures));
     manifest.set_int("fastmcd_failures", static_cast<std::int64_t>(fastmcd_failures));
+    if (!first_mahalanobis_failure.empty()) {
+        manifest.set_string("mahalanobis_first_failure", first_mahalanobis_failure);
+    }
+    if (!first_kde_failure.empty()) manifest.set_string("kde_first_failure", first_kde_failure);
+    if (!first_fastmcd_failure.empty()) {
+        manifest.set_string("fastmcd_first_failure", first_fastmcd_failure);
+    }
 
     return {};
 }

@@ -13,7 +13,7 @@ import struct
 import math
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from check_tube import read_gmmesh, principal_extents  # noqa: E402
+from mesh_shape import read_gmmesh, principal_extents  # noqa: E402
 
 
 def summarize(paths):

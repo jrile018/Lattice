@@ -41,6 +41,13 @@ embedding_dims = 3
 
 [boundaries]
 alpha = 0.05
+# Which views to score: any subset of the letters A, B and D. Defaults to
+# all three. Narrowing it exists so that investigating one view does not
+# cost the other two - a View A question is ~2 minutes on the full panel
+# and ~20 if View B is recomputed on the way past, and that difference
+# decides whether the question gets asked.
+#   views = "A"
+
 # ADR §6.4's default trailing-history length for View B (~3 years of
 # trading days).
 view_b_lookback_days = 756
