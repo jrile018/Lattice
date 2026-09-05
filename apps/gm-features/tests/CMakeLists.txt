@@ -8,9 +8,11 @@ add_executable(gm-features-tests
   centrality_test.cpp
   returns_test.cpp
   valuation_test.cpp
+  market_model_test.cpp
   ../centrality.cpp
   ../returns.cpp
   ../valuation.cpp
+  ../market_model.cpp
 )
 
 target_include_directories(gm-features-tests PRIVATE ..)

@@ -1,4 +1,5 @@
 #include "centrality.hpp"
+#include "market_model.hpp"
 #include "returns.hpp"
 #include "valuation.hpp"
 
@@ -134,7 +135,7 @@ gm::VoidResult write_valuation(const std::filesystem::path& output_dir, gm::Mani
     return {};
 }
 
-gm::VoidResult run_gm_features(const gm::Config& /*config*/, const std::filesystem::path& output_dir,
+gm::VoidResult run_gm_features(const gm::Config& config, const std::filesystem::path& output_dir,
                            gm::Manifest& manifest) {
     std::filesystem::path universe_dir = output_dir.parent_path() / "gm-universe";
     std::filesystem::path universe_path = universe_dir / "universe.parquet";
@@ -232,6 +233,19 @@ gm::VoidResult run_gm_features(const gm::Config& /*config*/, const std::filesyst
     std::vector<std::string> out_dates;
     std::vector<std::string> out_tickers;
     std::vector<double> out_returns_5d, out_returns_21d, out_returns_63d;
+    std::vector<double> out_beta, out_idio_vol;
+
+    // The market model, computed once for the whole panel rather than per
+    // row: the index is a property of each DATE across all names, so
+    // building it inside the row loop would rebuild it once per ticker.
+    const std::int64_t market_model_window =
+        config.get_int_or("features.market_model_window_days", 252);
+    const auto daily_returns = gm::features::compute_daily_returns(
+        *price_tickers, *price_dates, *price_adjclose);
+    const auto index_returns = gm::features::equal_weighted_index(daily_returns);
+    const auto market_models = gm::features::compute_market_model(
+        daily_returns, index_returns, static_cast<int>(market_model_window));
+    std::int64_t beta_present = 0;
     out_dates.reserve(dates_col->size());
     out_tickers.reserve(dates_col->size());
     out_returns_5d.reserve(dates_col->size());
@@ -256,6 +270,23 @@ gm::VoidResult run_gm_features(const gm::Config& /*config*/, const std::filesyst
         out_returns_5d.push_back(r5);
         out_returns_21d.push_back(r21);
         out_returns_63d.push_back(r63);
+
+        // Absent where there is not enough paired history, or where the
+        // index did not move in the window - NaN in the column, which the
+        // consumer reads as absent, never as a value.
+        double beta = std::numeric_limits<double>::quiet_NaN();
+        double idio = std::numeric_limits<double>::quiet_NaN();
+        const auto mm_ticker = market_models.find(ticker);
+        if (mm_ticker != market_models.end()) {
+            const auto mm_date = mm_ticker->second.find(date);
+            if (mm_date != mm_ticker->second.end()) {
+                beta = mm_date->second.beta;
+                idio = mm_date->second.idiosyncratic_volatility;
+                ++beta_present;
+            }
+        }
+        out_beta.push_back(beta);
+        out_idio_vol.push_back(idio);
     }
 
     std::int64_t rows_written = static_cast<std::int64_t>(out_dates.size());
@@ -279,14 +310,26 @@ gm::VoidResult run_gm_features(const gm::Config& /*config*/, const std::filesyst
         return tl::unexpected(r.error());
     if (auto r = table.add_double_column("returns_63d", std::move(out_returns_63d)); !r)
         return tl::unexpected(r.error());
-    // beta and idiosyncratic_volatility are NOT emitted: a market-model
-    // regression against a value/equal-weighted index return is a real,
-    // larger undertaking (needs an index return series this stage does
-    // not currently build) and was out of scope to implement correctly
-    // here. Per the review finding, no all-NaN placeholder column is
-    // shipped in this artifact - these two columns are simply absent
-    // until implemented for real in a follow-up, rather than shipped as
-    // a silently-fake feature.
+    if (auto r = table.add_double_column("beta", std::move(out_beta)); !r)
+        return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("idiosyncratic_volatility",
+                                          std::move(out_idio_vol)); !r)
+        return tl::unexpected(r.error());
+    // beta and idiosyncratic_volatility, now real (market_model.hpp).
+    // They were deliberately absent rather than shipped as all-NaN
+    // placeholders, which is why adding them needs no caveat about the
+    // artifact's history: nobody was ever given a fake column to trust.
+    //
+    // The index is equal-weighted and built from this panel - see
+    // market_model.hpp for why, in short: a value-weighted index needs a
+    // point-in-time share count whose coverage does not reach the start of
+    // the price window, so beta would move as coverage arrived rather than
+    // as the stock did.
+    //
+    // A (ticker, date) without enough paired history, or in a window where
+    // the index never moved, has NO market model - and is written as NaN
+    // here, the same absent-value convention the trailing returns beside
+    // it use.
 
     auto write_result = gm::io::write_parquet(table, output_dir / "features.parquet");
     if (!write_result) return tl::unexpected(write_result.error());
@@ -297,11 +340,14 @@ gm::VoidResult run_gm_features(const gm::Config& /*config*/, const std::filesyst
     manifest.set_int("returns_5d_present", returns_5d_present);
     manifest.set_int("returns_21d_present", returns_21d_present);
     manifest.set_int("returns_63d_present", returns_63d_present);
+    manifest.set_int("beta_present", beta_present);
+    manifest.set_int("market_model_window_days", market_model_window);
+    manifest.set_int("index_days", static_cast<std::int64_t>(index_returns.size()));
     manifest.set_string("note",
         "M6 ETF co-membership via GICS sector, computed point-in-time per (ticker, date). "
         "returns_5d/21d/63d are real trailing adjclose returns from prices.parquet. "
-        "beta and idiosyncratic_volatility are not yet implemented and are omitted "
-        "(not shipped as NaN placeholders).");
+        "beta and idiosyncratic_volatility are a real market-model regression against an "
+        "equal-weighted index built from this panel; absent where history is insufficient.");
 
     if (auto r = write_valuation(output_dir, manifest); !r) return tl::unexpected(r.error());
 
