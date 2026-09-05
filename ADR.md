@@ -649,7 +649,9 @@ number rather than an error:
 Per-ticker-DAY coverage is lower than per-issuer coverage, because a
 concept can resolve for an issuer and still not be published as of an early
 date. Measured on a real run, among ticker-days that have a market
-capitalisation: E/P 100%, FCF/P 94%, EBITDA/EV 57%.
+capitalisation on the full 98-issuer run: E/P 94.6%, FCF/P 77%,
+EBITDA/EV 53%, plus 4431 days excluded for a non-positive enterprise
+value.
 
 Each field takes the most recent figure for its period **or any earlier
 period** that was public by the row's own `available_date`. This introduces
@@ -671,7 +673,7 @@ with points degenerate or collinear in some dimension. KDE, which inverts
 nothing, scores all of them. So View D on its default axes is close to a
 ONE-dimensional view, and a genuinely independent second axis means
 EBITDA/EV - whose denominator is enterprise value rather than market cap -
-at 57% coverage instead of 94%.
+at 53% coverage instead of 77%.
 
 **View D therefore defaults to fitting in two dimensions**
 (`earnings_yield`, `fcf_yield`). A boundary is fitted in one space, so
