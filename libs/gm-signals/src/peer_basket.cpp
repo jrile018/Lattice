@@ -92,15 +92,29 @@ Result<Eigen::VectorXd> fit_peer_basket_weights(const Eigen::VectorXd& target_re
     CscArrays p_arr = upper_triangular_csc(p_dense);
     CscArrays a_arr = constraint_csc(kk);
 
-    OSQPCscMatrix* p_mat = OSQPCscMatrix_new(kk, kk, static_cast<OSQPInt>(p_arr.i.size()), p_arr.x.data(),
-                                              p_arr.i.data(), p_arr.p.data());
-    OSQPCscMatrix* a_mat = OSQPCscMatrix_new(kk + 1, kk, static_cast<OSQPInt>(a_arr.i.size()), a_arr.x.data(),
-                                              a_arr.i.data(), a_arr.p.data());
-    if (p_mat == nullptr || a_mat == nullptr) {
-        if (p_mat) OSQPCscMatrix_free(p_mat);
-        if (a_mat) OSQPCscMatrix_free(a_mat);
-        return tl::unexpected(gm::Error::make(gm::ErrorCode::kNumericFailure, "OSQPCscMatrix_new returned null"));
-    }
+    // Stack-allocated and filled through OSQPCscMatrix_set_data rather than
+    // built by OSQPCscMatrix_new.
+    //
+    // Not a style preference: OSQPCscMatrix_new is declared in OSQP's public
+    // header WITHOUT the OSQP_API export macro its neighbours carry, so it
+    // is absent from the shared library's export table entirely. Checked
+    // against the installed import library - of the OSQP* symbols only
+    // OSQPCscMatrix_set_data is exported, and the four allocators are not.
+    // On Linux this goes unnoticed because vcpkg's default triplet is
+    // static, where a symbol need not be exported to be linked; on Windows
+    // the default is shared and the link fails.
+    //
+    // Both structs are complete types in the public header, so this uses the
+    // exported, documented path instead - and drops two heap allocations,
+    // two null checks and three frees while it is at it.
+    OSQPCscMatrix p_mat_storage{};
+    OSQPCscMatrix a_mat_storage{};
+    OSQPCscMatrix* p_mat = &p_mat_storage;
+    OSQPCscMatrix* a_mat = &a_mat_storage;
+    OSQPCscMatrix_set_data(p_mat, kk, kk, static_cast<OSQPInt>(p_arr.i.size()), p_arr.x.data(),
+                            p_arr.i.data(), p_arr.p.data());
+    OSQPCscMatrix_set_data(a_mat, kk + 1, kk, static_cast<OSQPInt>(a_arr.i.size()), a_arr.x.data(),
+                            a_arr.i.data(), a_arr.p.data());
 
     std::vector<OSQPFloat> l_vec(static_cast<std::size_t>(kk) + 1), u_vec(static_cast<std::size_t>(kk) + 1);
     l_vec[0] = 1.0;
@@ -110,7 +124,12 @@ Result<Eigen::VectorXd> fit_peer_basket_weights(const Eigen::VectorXd& target_re
         u_vec[static_cast<std::size_t>(j) + 1] = std::numeric_limits<OSQPFloat>::infinity();
     }
 
-    OSQPSettings* settings = OSQPSettings_new();
+    // Same reasoning as above: OSQPSettings_new is not exported either.
+    // osqp_set_default_settings is, and is what fills a settings struct
+    // with the defaults OSQPSettings_new would have applied.
+    OSQPSettings settings_storage{};
+    OSQPSettings* settings = &settings_storage;
+    osqp_set_default_settings(settings);
     settings->verbose = 0;
     // OSQP v1.0 defaults to a duality-gap termination criterion
     // (check_dualgap=1) alongside the classical primal/dual-residual
@@ -128,15 +147,13 @@ Result<Eigen::VectorXd> fit_peer_basket_weights(const Eigen::VectorXd& target_re
     OSQPInt setup_flag = osqp_setup(&solver, p_mat, q_vec.data(), a_mat, l_vec.data(), u_vec.data(), kk + 1, kk,
                                      settings);
 
-    // osqp_setup documented as copying problem data internally (the
+    // osqp_setup is documented as copying problem data internally - the
     // solver must retain it across solve()/update_data_* calls, which
-    // outlive this function's stack-local buffers) - safe to free our
-    // CSC wrappers now regardless of setup's outcome. OSQPCscMatrix_free
-    // only frees the wrapper struct here (owned=0 for user-backed
-    // arrays per OSQPCscMatrix_new's contract), never our std::vectors.
-    OSQPCscMatrix_free(p_mat);
-    OSQPCscMatrix_free(a_mat);
-    OSQPSettings_free(settings);
+    // outlive this function's stack-local buffers - so nothing here needs
+    // to survive past this point. The three structs are automatic storage
+    // now, so there is nothing to free: what the old code freed was only
+    // ever the wrapper structs (owned=0 for user-backed arrays), never the
+    // std::vectors behind them, and those are still owned by this scope.
 
     if (setup_flag != 0 || solver == nullptr) {
         if (solver) osqp_cleanup(solver);
