@@ -11,6 +11,7 @@ configure_file(
 add_executable(gm-golden-tests
   m0_pipeline_test.cpp
   causality_test.cpp
+  determinism_test.cpp
 )
 
 target_link_libraries(gm-golden-tests
@@ -36,6 +37,7 @@ target_compile_definitions(gm-golden-tests PRIVATE
   # gm-boundaries' windowing, and running the other eight stages to reach
   # it would only add ways for the test to fail for unrelated reasons.
   GM_BOUNDARIES_EXECUTABLE="$<TARGET_FILE:gm-boundaries>"
+  GM_GEOMETRY_EXECUTABLE="$<TARGET_FILE:gm-geometry>"
 )
 
 catch_discover_tests(gm-golden-tests)
