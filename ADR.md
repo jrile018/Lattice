@@ -661,6 +661,18 @@ re-reported as a comparative in nearly every later filing and so has many
 more vintages than capex does, and those extra anchors previously produced
 rows carrying net income and nothing else.
 
+**Measured collinearity of the two default axes.** E/P and FCF/P share a
+denominator, so between filings they are exactly proportional. Over 25806
+real windows the median absolute correlation between them is **0.87**, the
+90th percentile is **0.998**, and **17%** of windows exceed 0.99. The 754
+windows (2.9%) that Mahalanobis and FastMCD both refuse to fit ARE that
+collinearity - Mahalanobis names it, reporting a near-singular covariance
+with points degenerate or collinear in some dimension. KDE, which inverts
+nothing, scores all of them. So View D on its default axes is close to a
+ONE-dimensional view, and a genuinely independent second axis means
+EBITDA/EV - whose denominator is enterprise value rather than market cap -
+at 57% coverage instead of 94%.
+
 **View D therefore defaults to fitting in two dimensions**
 (`earnings_yield`, `fcf_yield`). A boundary is fitted in one space, so
 every point must carry every configured axis; adding EBITDA/EV does not
