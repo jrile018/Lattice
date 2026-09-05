@@ -2,7 +2,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <filesystem>
+#include <limits>
 
 using gm::io::read_parquet;
 using gm::io::Table;
@@ -91,4 +93,51 @@ TEST_CASE("write creates missing parent directories", "[parquet]") {
     CHECK(std::filesystem::exists(path));
 
     std::filesystem::remove_all(temp_parquet_path("nested"));
+}
+
+TEST_CASE("a NaN survives the round-trip as a NaN, not as a zero", "[parquet]") {
+    // The valuation artifacts encode "this coordinate could not be computed"
+    // as a non-finite double in a Parquet column, which the consumer turns
+    // back into an explicit per-coordinate status (ADR-019 forbids NaN as a
+    // sentinel INSIDE the computation; this is the artifact boundary, where
+    // there is no other way to say "absent" in a fixed-width double column).
+    //
+    // That whole design rests on one property nothing tested: a NaN written
+    // here reads back as a NaN. If the writer or reader turned it into 0.0 -
+    // which is what a naive null-to-default conversion does - then an issuer
+    // with no derivable EBITDA would be recorded as having EBITDA of exactly
+    // zero, and that computes a perfectly plausible yield of zero rather
+    // than an absence. Nothing downstream could tell the difference, and the
+    // number would be wrong in the direction that makes a company look
+    // expensive.
+    //
+    // Infinities are checked alongside because the same reasoning applies
+    // and they arrive from the same place: a division that should not have
+    // happened upstream.
+    auto path = temp_parquet_path("nan_roundtrip.parquet");
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    Table original;
+    REQUIRE(original.add_string_column("ticker", {"AAA", "BBB", "CCC", "DDD"}).has_value());
+    REQUIRE(original.add_double_column("ebitda_ev_yield", {0.075, nan, inf, -inf}).has_value());
+
+    REQUIRE(write_parquet(original, path).has_value());
+    auto read_back = read_parquet(path);
+    REQUIRE(read_back.has_value());
+
+    auto column = read_back->double_column("ebitda_ev_yield");
+    REQUIRE(column.has_value());
+    REQUIRE(column->size() == 4);
+
+    CHECK((*column)[0] == 0.075);
+    CHECK(std::isnan((*column)[1]));
+    CHECK_FALSE((*column)[1] == 0.0);  // the specific corruption this guards
+    CHECK(std::isinf((*column)[2]));
+    CHECK((*column)[2] > 0.0);
+    CHECK(std::isinf((*column)[3]));
+    CHECK((*column)[3] < 0.0);
+
+    std::filesystem::remove(path);
 }
