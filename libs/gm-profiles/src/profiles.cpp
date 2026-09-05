@@ -50,11 +50,17 @@ gm::Result<CompanyProfile> fetch_company_profile(gm::io::HttpCache& cache,
         std::string sic_str = doc.at("sic").get<std::string>();
         try {
             profile.sic_code = std::stoll(sic_str);
-        } catch (const std::invalid_argument& e) {
+        } catch (const std::exception& e) {
+            // std::exception, not std::invalid_argument: stoll also throws
+            // out_of_range, and catching only the first let a twenty-digit
+            // SIC field propagate an exception across a library boundary,
+            // which ADR-019 forbids. The exception's own message says which
+            // of the two it was, so it goes into the context rather than
+            // being discarded - discarding it was also what made MSVC warn.
             return tl::unexpected(gm::Error::make(
                 gm::ErrorCode::kParseFailure,
                 "SIC code is not a valid number: " + sic_str,
-                "ticker " + ticker + ", CIK " + padded));
+                "ticker " + ticker + ", CIK " + padded + ": " + e.what()));
         }
         
         profile.sic_description = doc.at("sicDescription").get<std::string>();

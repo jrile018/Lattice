@@ -44,6 +44,13 @@ if (MSVC)
     /fp:precise
     /permissive-
     /Zc:preprocessor
+    # C4714: a function marked __forceinline was not inlined. Emitted from
+    # boost::math's headers, and NOT suppressed by the /external:W0 already
+    # applied to the vcpkg include tree - C4714 is issued during code
+    # generation rather than while parsing the header, so it escapes the
+    # scope /external governs. It reports an optimiser decision about
+    # somebody else's header and says nothing about this code.
+    /wd4714
   )
 else()
   target_compile_options(gm_project_options INTERFACE

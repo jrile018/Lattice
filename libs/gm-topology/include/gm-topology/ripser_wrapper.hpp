@@ -27,6 +27,12 @@
 // warning policy or hand-editing every index_t/size_t site in someone
 // else's reference algorithm.
 #define PRINT_PERSISTENCE_PAIRS
+
+// Guarded because MSVC does not know `#pragma GCC` and warns C4068 for
+// each one - which /WX then turns into an error, so the unguarded version
+// failed the Windows build on the suppressions themselves rather than on
+// anything they were suppressing.
+#if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wconversion"
 #pragma GCC diagnostic ignored "-Wsign-conversion"
@@ -34,8 +40,23 @@
 #pragma GCC diagnostic ignored "-Wignored-qualifiers"
 #pragma GCC diagnostic ignored "-Wfloat-conversion"
 #pragma GCC diagnostic ignored "-Wsign-compare"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4244)  // conversion, possible loss of data
+#pragma warning(disable : 4245)  // signed/unsigned mismatch in conversion
+#pragma warning(disable : 4267)  // size_t to smaller type
+#pragma warning(disable : 4100)  // unreferenced formal parameter
+#pragma warning(disable : 4389)  // signed/unsigned mismatch in comparison
+#pragma warning(disable : 4018)  // signed/unsigned mismatch
+#endif
+
 #include <ripser/ripser.hpp>
+
+#if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 #include <gm-core/error.hpp>
 #include <tl/expected.hpp>
