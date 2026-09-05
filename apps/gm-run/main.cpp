@@ -76,6 +76,28 @@ std::string quote_arg(const std::string& s) {
     return out;
 }
 
+/// Hands `command` to the shell, with the one piece of Windows quoting
+/// that a quoted-executable-plus-quoted-arguments line requires.
+///
+/// cmd.exe strips the FIRST and LAST quote characters of a command line
+/// that both begins with a quote and contains others. Since quote_arg
+/// above quotes the executable and every argument - which it must, because
+/// a Windows repository path routinely contains spaces - the line gm-run
+/// builds is exactly that shape, and cmd was mangling it into a path that
+/// names nothing. The documented remedy is one more enclosing pair, which
+/// cmd consumes.
+///
+/// The effect of not doing this was total: gm-run could not launch any
+/// stage on Windows at all.
+int shell_execute(const std::string& command) {
+#if defined(_WIN32)
+    const std::string wrapped = "\"" + command + "\"";
+    return std::system(wrapped.c_str());
+#else
+    return std::system(command.c_str());
+#endif
+}
+
 /// std::system()'s return value encodes the child's exit code
 /// differently on POSIX (via wait-status macros) vs Windows (the raw
 /// exit code) - normalize it here so callers see one convention.
@@ -156,7 +178,7 @@ int main(int argc, char** argv) {
 
         spdlog::info("gm-run: [{}] launching: {}", stage, cmd.str());
         auto stage_start = std::chrono::steady_clock::now();
-        int raw_result = std::system(cmd.str().c_str());
+        int raw_result = shell_execute(cmd.str());
         int exit_code = normalized_exit_code(raw_result);
         auto stage_elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count();
