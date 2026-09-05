@@ -31,6 +31,7 @@
 // position's P&L across multiple days), and excursions.parquet
 // (ticker, start_date, end_date, peak_depth, reverted, duration_days).
 
+#include <gm-boundaries/mahalanobis.hpp>
 #include <gm-core/stage_main.hpp>
 #include <gm-io/parquet.hpp>
 #include <gm-io/table.hpp>
@@ -229,6 +230,74 @@ std::optional<SpreadRow> compute_spread_row(const std::string& target, const std
     std::vector<double> weight_values(weights->data(), weights->data() + weights->size());
     return SpreadRow{today,      target,  *z, s_today, ou->half_life, static_cast<int>(k),
                       neighbors, std::move(weight_values)};
+}
+
+/// One ticker's View C rows: the boundary on (z, z-dot) that ADR 6.4
+/// specifies, fitted to the trailing window of this name's own
+/// (z, z-dot) pairs and scoring today's pair against it.
+///
+/// z-dot is the one-step change in z. A threshold on |z| alone cannot
+/// tell "two standard deviations out and still widening" from "two out
+/// and snapping back", and those are opposite trades; the second
+/// coordinate is what separates them.
+///
+/// Strictly causal, exactly as View B is: the window ends the day BEFORE
+/// the point being scored, so a pair never helps build the cloud it is
+/// measured against.
+struct ViewCRows {
+    std::vector<std::string> dates, tickers, views, estimators;
+    std::vector<double> depths, pvalues;
+    std::vector<std::uint8_t> insides;
+    std::int64_t fit_failures = 0;
+};
+
+void score_view_c(const std::vector<std::string>& dates, const std::vector<double>& z,
+                  const std::string& ticker, std::int64_t lookback, double alpha,
+                  ViewCRows& out) {
+    if (z.size() < 2) return;
+
+    // (z, z-dot) pairs, one per date from the second onward - the first
+    // date has no previous z to difference against.
+    std::vector<std::array<double, 2>> pairs;
+    std::vector<std::string> pair_dates;
+    pairs.reserve(z.size() - 1);
+    pair_dates.reserve(z.size() - 1);
+    for (std::size_t i = 1; i < z.size(); ++i) {
+        if (!std::isfinite(z[i]) || !std::isfinite(z[i - 1])) continue;
+        pairs.push_back({z[i], z[i] - z[i - 1]});
+        pair_dates.push_back(dates[i]);
+    }
+    if (static_cast<std::int64_t>(pairs.size()) <= lookback) return;
+
+    for (std::size_t i = static_cast<std::size_t>(lookback); i < pairs.size(); ++i) {
+        const std::size_t first = i - static_cast<std::size_t>(lookback);
+        Eigen::MatrixXd training(static_cast<Eigen::Index>(lookback), 2);
+        for (std::size_t j = first; j < i; ++j) {
+            training(static_cast<Eigen::Index>(j - first), 0) = pairs[j][0];
+            training(static_cast<Eigen::Index>(j - first), 1) = pairs[j][1];
+        }
+        Eigen::VectorXd query(2);
+        query(0) = pairs[i][0];
+        query(1) = pairs[i][1];
+
+        auto fit = gm::boundaries::fit_mahalanobis(training);
+        if (!fit) {
+            ++out.fit_failures;
+            continue;
+        }
+        auto score = gm::boundaries::score_mahalanobis(*fit, query, alpha);
+        if (!score) {
+            ++out.fit_failures;
+            continue;
+        }
+        out.dates.push_back(pair_dates[i]);
+        out.tickers.push_back(ticker);
+        out.views.emplace_back("C");
+        out.estimators.emplace_back("mahalanobis");
+        out.depths.push_back(score->depth);
+        out.pvalues.push_back(score->p_value);
+        out.insides.push_back(score->inside ? 1 : 0);
+    }
 }
 
 gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::path& output_dir,
@@ -451,6 +520,21 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     std::vector<std::uint8_t> exc_reverted;
     std::vector<std::int64_t> exc_duration_days;
 
+    // ADR 6.4's View C boundary. Written as its own artifact rather than
+    // into gm-boundaries' scores.parquet because that stage runs before
+    // this one and the z-series does not exist yet when it does - but with
+    // the SAME schema, so a consumer reads both identically.
+    const std::int64_t view_c_lookback = config.get_int_or("signals.view_c_lookback_days", 120);
+    const double view_c_alpha = config.get_double_or("signals.view_c_alpha", 0.05);
+    ViewCRows view_c;
+    if (view_c_lookback >= 3) {
+        for (const auto& [ticker, series] : zscore_series_by_ticker) {
+            const auto dates_it = zscore_dates_by_ticker.find(ticker);
+            if (dates_it == zscore_dates_by_ticker.end()) continue;
+            score_view_c(dates_it->second, series, ticker, view_c_lookback, view_c_alpha, view_c);
+        }
+    }
+
     for (const auto& [ticker, dates] : zscore_dates_by_ticker) {
         const auto& series = zscore_series_by_ticker.at(ticker);
         Eigen::VectorXd z_vec = Eigen::Map<const Eigen::VectorXd>(series.data(), static_cast<Eigen::Index>(series.size()));
@@ -489,6 +573,26 @@ gm::VoidResult run_gm_signals(const gm::Config& config, const std::filesystem::p
     manifest.set_int("rows_written", static_cast<std::int64_t>(spreads_table.num_rows()));
     manifest.set_int("basket_rows_written", static_cast<std::int64_t>(baskets_table.num_rows()));
     manifest.set_int("rows_skipped_incomplete", rows_skipped_incomplete);
+    // View C's boundary scores, same schema as gm-boundaries' scores.parquet.
+    gm::io::Table view_c_table;
+    if (auto r = view_c_table.add_string_column("date", std::move(view_c.dates)); !r) return tl::unexpected(r.error());
+    if (auto r = view_c_table.add_string_column("ticker", std::move(view_c.tickers)); !r) return tl::unexpected(r.error());
+    if (auto r = view_c_table.add_string_column("view", std::move(view_c.views)); !r) return tl::unexpected(r.error());
+    if (auto r = view_c_table.add_string_column("estimator", std::move(view_c.estimators)); !r) return tl::unexpected(r.error());
+    if (auto r = view_c_table.add_double_column("depth", std::move(view_c.depths)); !r) return tl::unexpected(r.error());
+    if (auto r = view_c_table.add_double_column("pvalue", std::move(view_c.pvalues)); !r) return tl::unexpected(r.error());
+    if (auto r = view_c_table.add_bool_column("inside", std::move(view_c.insides)); !r) return tl::unexpected(r.error());
+    auto write_view_c = gm::io::write_parquet(view_c_table, output_dir / "view_c_scores.parquet");
+    if (!write_view_c) return tl::unexpected(write_view_c.error());
+
+    manifest.set_int("view_c_rows", static_cast<std::int64_t>(view_c_table.num_rows()));
+    manifest.set_int("view_c_lookback_days", view_c_lookback);
+    // A fit can fail on a degenerate window - a stretch where z barely
+    // moved leaves z-dot with no spread at all. Counted so a run that
+    // silently produced almost nothing is distinguishable from one that
+    // had nothing to produce.
+    manifest.set_int("view_c_fit_failures", view_c.fit_failures);
+
     manifest.set_int("rows_tear_flagged", rows_tear_flagged);
     manifest.set_int("excursions_written", static_cast<std::int64_t>(excursions_table.num_rows()));
     manifest.set_int("spread_fit_window_days", window);

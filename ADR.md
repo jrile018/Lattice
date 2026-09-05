@@ -604,6 +604,10 @@ runs/2026-08-29__w60_k3_mds_rmt/
     {date}_A.gmmesh              View A: the market's envelope that date
     {date}_B_{ticker}.gmmesh     View B: one ticker's own tube
   scores.parquet       date, ticker, view, estimator, depth, pvalue, inside
+  view_c_scores.parquet  the SAME schema, written by gm-signals rather
+                       than gm-boundaries: View C is fitted to the
+                       z-series, which does not exist until gm-signals
+                       computes it, and gm-boundaries runs before it
                        view is "A" (market cross-section), "B" (one name's
                        own embedding history) or "D" (one name's own
                        valuation history, §6.6); depth is a SIGNED margin,
