@@ -817,12 +817,12 @@ Performance contract: < 1 ms frame decode from the mapped run directory; 60 fps 
 ## 12. Open questions
 
 1. Universe reconstitution frequency — annual assumed; quarterly tracks liquidity better but adds geometric turnover noise.
-2. Scoring dimension — display is 3; whether scoring uses 3/5/10 is a phase-3 sweep.
+2. Scoring dimension — display is 3; whether scoring uses 3/5/10 is a phase-3 sweep. **Partially informed:** the pipeline now genuinely scores in *k* dimensions rather than silently in 3, and a k=10 run over the full panel completes in the same order of time as k=3 (geometry 6.8s; boundaries scoring materially slower but tractable). One measured cost: at k=10, FastMCD declines to fit one frame in the whole 2010-2026 panel (2014-04-16, all 81 tickers), where at k=3 it declines none — the h-subset covariance is 10x10 and no subset of that frame yields a non-singular one. The other two estimators score it normally.
 3. Within-sector vs cross-sector fits — likely different reversion characteristics; test both.
 4. Short-side borrow feasibility — footnote in phase 1; becomes a constraint if the book is short-biased.
 5. Market-mode removal for View C — help or hurt? Both `C*` and `C_res` retained until settled.
 6. MSVC↔GCC bit-reproducibility — same platform reproduces bit-identically (guaranteed); cross-platform is tolerance-based; goldens are per-platform if needed.
-7. Quarterly shelving in View D — each earnings release steps the valuation cloud, giving it roughly twelve shelves per 756-day window. Does that distort the robust ellipsoid enough to matter, and if so is the answer a longer window, a shelf-aware weighting, or nothing? Measure before deciding (ADR-022).
+7. Quarterly shelving in View D — **measured, and it matters more than "shelving" suggested.** The shelves are not merely steps: between filings *every* numerator is constant while the shared denominator (market cap) moves, so E/P and FCF/P are exactly proportional within a quarter and each shelf is a RAY through the origin rather than a plateau. A 756-day window is a fan of about twelve such rays, and it collapses toward a line whenever the cash-flow-to-earnings ratio is stable across them. Over 25806 real windows the median absolute correlation between the two axes is 0.87, the 90th percentile 0.998, and 17% exceed 0.99; 2.9% are singular enough that Mahalanobis and FastMCD both decline to fit while KDE, which inverts nothing, does not. So the answer is not a longer window — a longer window adds more nearly-parallel rays. It is a second axis with a DIFFERENT denominator, which means EBITDA/EV, at 53% ticker-day coverage against 77%. The run publishes the correlation so the choice is made on numbers.
 8. Cross-sectional valuation geometry — a valuation View A needs a sector normalization that ADR-022 deliberately does not choose. Revisit once View D has been measured on its own.
 
 ---
