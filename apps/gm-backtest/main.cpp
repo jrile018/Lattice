@@ -246,6 +246,98 @@ gm::Result<ViewBByTickerDate> load_view_b(const gm::io::Table& t) {
     return result;
 }
 
+/// ticker -> date -> whether View D placed the name INSIDE its own
+/// valuation boundary that day. Same shape and same estimator choice as
+/// load_view_b, deliberately: the two are read side by side and a
+/// difference in estimator between them would be an unexplained
+/// asymmetry rather than a decision.
+gm::Result<ViewBByTickerDate> load_view_d(const gm::io::Table& t) {
+    auto date_col = t.string_column("date");
+    if (!date_col) return tl::unexpected(date_col.error());
+    auto ticker_col = t.string_column("ticker");
+    if (!ticker_col) return tl::unexpected(ticker_col.error());
+    auto view_col = t.string_column("view");
+    if (!view_col) return tl::unexpected(view_col.error());
+    auto estimator_col = t.string_column("estimator");
+    if (!estimator_col) return tl::unexpected(estimator_col.error());
+    auto inside_col = t.bool_column("inside");
+    if (!inside_col) return tl::unexpected(inside_col.error());
+
+    ViewBByTickerDate result;
+    for (std::size_t i = 0; i < date_col->size(); ++i) {
+        if ((*view_col)[i] != "D" || (*estimator_col)[i] != "mahalanobis") continue;
+        result[(*ticker_col)[i]][(*date_col)[i]] = (*inside_col)[i];
+    }
+    return result;
+}
+
+/// ticker -> date -> earnings yield, from gm-features' valuation.parquet.
+///
+/// std::map rather than a hash: the trailing-median lookup below walks a
+/// date range, which needs ordered iteration, and ADR-003 wants
+/// deterministic order regardless.
+using YieldByTickerDate = std::map<std::string, std::map<std::string, double>>;
+
+gm::Result<YieldByTickerDate> load_earnings_yield(const gm::io::Table& t) {
+    auto date_col = t.string_column("date");
+    if (!date_col) return tl::unexpected(date_col.error());
+    auto ticker_col = t.string_column("ticker");
+    if (!ticker_col) return tl::unexpected(ticker_col.error());
+    auto ep_col = t.double_column("earnings_yield");
+    if (!ep_col) return tl::unexpected(ep_col.error());
+
+    YieldByTickerDate result;
+    for (std::size_t i = 0; i < date_col->size(); ++i) {
+        // An absent coordinate arrives as NaN; skipped rather than stored,
+        // so the median below is over observations that exist.
+        if (!std::isfinite((*ep_col)[i])) continue;
+        result[(*ticker_col)[i]][(*date_col)[i]] = (*ep_col)[i];
+    }
+    return result;
+}
+
+/// The median earnings yield for `ticker` over the `lookback` observations
+/// STRICTLY BEFORE `as_of`, and the value on `as_of` itself.
+///
+/// Strictly before matters: including the entry day in its own reference
+/// median drags the median toward the value being tested, which shrinks
+/// exactly the signal the gate is looking for - the same self-inclusion
+/// error View B's window is written to avoid.
+struct YieldContext {
+    bool valid = false;
+    double current = 0.0;
+    double trailing_median = 0.0;
+};
+
+YieldContext yield_context(const YieldByTickerDate& yields, const std::string& ticker,
+                           const std::string& as_of, int lookback) {
+    YieldContext out;
+    const auto ticker_it = yields.find(ticker);
+    if (ticker_it == yields.end()) return out;
+    const auto& series = ticker_it->second;
+
+    const auto today = series.find(as_of);
+    if (today == series.end()) return out;
+    out.current = today->second;
+
+    std::vector<double> prior;
+    prior.reserve(static_cast<std::size_t>(lookback));
+    // Walk backwards from the entry date, exclusive.
+    for (auto it = today; it != series.begin() && static_cast<int>(prior.size()) < lookback;) {
+        --it;
+        prior.push_back(it->second);
+    }
+    // A median over a handful of points is not a reference distribution.
+    if (prior.size() < static_cast<std::size_t>(std::max(2, lookback / 4))) return out;
+
+    std::sort(prior.begin(), prior.end());
+    const std::size_t mid = prior.size() / 2;
+    out.trailing_median =
+        prior.size() % 2 == 1 ? prior[mid] : 0.5 * (prior[mid - 1] + prior[mid]);
+    out.valid = true;
+    return out;
+}
+
 gm::Result<std::map<std::string, double>> load_regime(const gm::io::Table& t) {
     auto date_col = t.string_column("date");
     if (!date_col) return tl::unexpected(date_col.error());
@@ -331,8 +423,53 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     if (!spreads) return tl::unexpected(spreads.error());
     auto baskets = load_baskets(*baskets_table);
     if (!baskets) return tl::unexpected(baskets.error());
+    // ADR-022's valuation gate. "off" by default so no existing run
+    // silently changes its answer.
+    //
+    //   off               no valuation condition (the historical behaviour)
+    //   cheap             the name's earnings yield at entry must exceed its
+    //                     own trailing median - the price fell without the
+    //                     earnings falling with it
+    //   diverged_and_cheap   as above, AND View D must place the name
+    //                     OUTSIDE its own valuation boundary, so the move
+    //                     has to be large enough to be unusual at all
+    const std::string valuation_gate = config.get_string_or("backtest.valuation_gate", "off");
+    if (valuation_gate != "off" && valuation_gate != "cheap" &&
+        valuation_gate != "diverged_and_cheap") {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kInvalidArgument,
+            "backtest.valuation_gate must be off, cheap or diverged_and_cheap",
+            valuation_gate));
+    }
+    const std::int64_t valuation_lookback =
+        config.get_int_or("backtest.valuation_gate_lookback_days", 252);
+
     auto view_b = load_view_b(*scores_table);
     if (!view_b) return tl::unexpected(view_b.error());
+
+    // Only loaded when the gate is on: a run with the gate off must not
+    // fail because an upstream stage it does not use produced nothing.
+    ViewBByTickerDate view_d;
+    YieldByTickerDate earnings_yields;
+    if (valuation_gate != "off") {
+        auto loaded_d = load_view_d(*scores_table);
+        if (!loaded_d) return tl::unexpected(loaded_d.error());
+        view_d = std::move(*loaded_d);
+
+        const auto valuation_path =
+            output_dir.parent_path() / "gm-features" / "valuation.parquet";
+        if (!std::filesystem::exists(valuation_path)) {
+            return tl::unexpected(gm::Error::make(
+                gm::ErrorCode::kNotFound,
+                "backtest.valuation_gate is on but there is no valuation.parquet upstream",
+                "run gm-ingest with fetch_fundamentals = true, then gm-features"));
+        }
+        auto valuation_table = gm::io::read_parquet(valuation_path);
+        if (!valuation_table) return tl::unexpected(valuation_table.error());
+        auto loaded_yields = load_earnings_yield(*valuation_table);
+        if (!loaded_yields) return tl::unexpected(loaded_yields.error());
+        earnings_yields = std::move(*loaded_yields);
+    }
     auto regime = load_regime(*regime_table);
     if (!regime) return tl::unexpected(regime.error());
     auto log_prices = load_log_prices(*prices_table);
@@ -348,6 +485,8 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     std::int64_t min_half_life = config.get_int_or("backtest.min_half_life_days", 3);
     std::int64_t max_half_life = config.get_int_or("backtest.max_half_life_days", 30);
     double veto_percentile = config.get_double_or("backtest.structural_change_veto_percentile", 0.95);
+
+
     double cost_bps_per_leg = config.get_double_or("backtest.cost_bps_per_leg", 5.0);
     double horizon_multiplier = config.get_double_or("backtest.horizon_multiplier", 3.0);
     std::string cache_dir = config.get_string_or("backtest.sec_cache_dir", "data/raw/sec_submissions");
@@ -386,6 +525,12 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     std::int64_t rejected_earnings = 0;
     std::int64_t rejected_no_basket_weights = 0;
     std::int64_t rejected_empty_fixed_series = 0;
+    // Split three ways rather than one, because they call for different
+    // responses: no coverage at all is a data problem, "not cheap" is the
+    // gate doing its job, and "not unusual" is the boundary doing its job.
+    std::int64_t rejected_valuation_no_data = 0;
+    std::int64_t rejected_valuation_not_cheap = 0;
+    std::int64_t rejected_valuation_not_diverged = 0;
 
     std::vector<gm::backtest::TradeCandidate> candidates;
 
@@ -436,6 +581,38 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
         if (regime_it == regime->end() || regime_it->second >= veto_threshold) {
             ++rejected_view_a_veto;
             continue;
+        }
+
+        // ADR-022's valuation gate. See the config comment above for the
+        // modes and the loader comment for why direction has to be tested
+        // explicitly rather than read off View D's inside/outside alone.
+        if (valuation_gate != "off") {
+            const YieldContext yc = yield_context(earnings_yields, exc.ticker, exc.start_date,
+                                                   static_cast<int>(valuation_lookback));
+            if (!yc.valid) {
+                ++rejected_valuation_no_data;
+                continue;
+            }
+            // Cheaper than its own recent normal: the price fell and the
+            // earnings did not fall with it.
+            if (!(yc.current > yc.trailing_median)) {
+                ++rejected_valuation_not_cheap;
+                continue;
+            }
+            if (valuation_gate == "diverged_and_cheap") {
+                const auto vd_ticker_it = view_d.find(exc.ticker);
+                bool view_d_outside = false;
+                if (vd_ticker_it != view_d.end()) {
+                    const auto vd_date_it = vd_ticker_it->second.find(exc.start_date);
+                    if (vd_date_it != vd_ticker_it->second.end()) {
+                        view_d_outside = !vd_date_it->second;
+                    }
+                }
+                if (!view_d_outside) {
+                    ++rejected_valuation_not_diverged;
+                    continue;
+                }
+            }
         }
 
         int horizon_days = static_cast<int>(std::ceil(horizon_multiplier * entry_point.half_life));
@@ -506,6 +683,16 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     results["rejected_earnings_in_horizon"] = rejected_earnings;
     results["rejected_no_basket_weights"] = rejected_no_basket_weights;
     results["rejected_empty_fixed_series"] = rejected_empty_fixed_series;
+    results["valuation_gate"] = valuation_gate;
+    if (valuation_gate != "off") {
+        results["valuation_gate_lookback_days"] = valuation_lookback;
+        // Split three ways because they call for different responses: no
+        // coverage is a data problem, "not cheap" is the gate doing its
+        // job, "not diverged" is the boundary doing its job.
+        results["rejected_valuation_no_data"] = rejected_valuation_no_data;
+        results["rejected_valuation_not_cheap"] = rejected_valuation_not_cheap;
+        results["rejected_valuation_not_diverged"] = rejected_valuation_not_diverged;
+    }
     results["structural_change_veto_threshold"] = veto_threshold;
     results["trading_days_with_positions"] = portfolio->dates.size();
 
@@ -562,6 +749,7 @@ gm::VoidResult run_gm_backtest(const gm::Config& config, const std::filesystem::
     manifest.set_double("cost_bps_per_leg", cost_bps_per_leg);
     manifest.set_int("min_half_life_days", min_half_life);
     manifest.set_int("max_half_life_days", max_half_life);
+    manifest.set_string("valuation_gate", valuation_gate);
 
     return {};
 }
