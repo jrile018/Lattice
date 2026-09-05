@@ -163,7 +163,7 @@ ADR-013's reversion gate passes is a question about findings, not about
 code, and answering it here by implication would be exactly the kind of
 quiet overclaim the rest of this repo is written to avoid.
 
-**Test suite: 326 tests, green in both `linux-gcc-release` and
+**Test suite: 343 tests, green in both `linux-gcc-release` and
 `linux-gcc-asan`.** Every milestone below closes only on that pair (ADR.md
 §13).
 
@@ -178,6 +178,7 @@ quiet overclaim the rest of this repo is written to avoid.
 | M4 — Signals | Peer baskets, OU fitting, excursion tracking, earnings/8-K tagging, the reversion study |
 | M5 — Backtest | Walk-forward engine, cost model, Deflated Sharpe, `gm-sweep` sharding |
 | M6 — Depth | FastMCD, tear veto, remaining viewer tabs, SEC company profiles, ETF co-membership |
+| M7 — Valuation | SEC XBRL tag chains measured against real filings, `fundamentals.parquet`, `valuation.parquet`, View D |
 
 ### The two views, on screen
 
