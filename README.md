@@ -65,6 +65,21 @@ The first configure builds every pinned dependency from source (Arrow is
 the long pole — expect 30-90 minutes on the first run, cached
 thereafter). Subsequent configures are fast.
 
+**The `tools/vcpkg` checkout must be at the baseline commit**, which is
+what the `git checkout` line above does. Pointing it at a newer vcpkg —
+or at an existing system-wide one — fails during dependency resolution
+with *"osqp does not exist"*, because the pinned baseline names versions
+that a newer ports tree no longer carries. Measured cost of getting this
+wrong: the error arrives 27 minutes in, after everything else has built.
+
+**Windows** additionally needs a Developer Command Prompt (or
+`vcvars64.bat`) so `cl.exe` is on `PATH`, and Ninja on `PATH` — if CMake
+reports *"unable to find a build program corresponding to Ninja"*, pass
+`-DCMAKE_MAKE_PROGRAM=<path to ninja.exe>`.
+
+Both platforms are verified green at **347 tests**: `linux-gcc-release`,
+`linux-gcc-asan`, and `windows-msvc-release`.
+
 ## Repository layout
 
 See ADR.md §8.1 for the full annotated layout. Short version:
@@ -163,9 +178,16 @@ ADR-013's reversion gate passes is a question about findings, not about
 code, and answering it here by implication would be exactly the kind of
 quiet overclaim the rest of this repo is written to avoid.
 
-**Test suite: 347 tests, green in both `linux-gcc-release` and
-`linux-gcc-asan`.** Every milestone below closes only on that pair (ADR.md
-§13).
+**Test suite: 347 tests, green in `linux-gcc-release`, `linux-gcc-asan`
+and `windows-msvc-release`.** Every milestone below closes only on that
+set (ADR.md §13).
+
+The Windows leg had never actually been run before, and running it found
+nine defects — including one that mattered: **`gm-run` could not launch a
+single stage on Windows**, because `cmd.exe` strips the outermost quotes
+of a command line that begins with a quote and contains more. The golden
+test that exists to catch precisely that had the same bug in its own
+invocation, so it could never have reported it.
 
 ### Built
 
