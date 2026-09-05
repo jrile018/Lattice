@@ -395,20 +395,48 @@ void upload_frame(gm::view::PointCloudRenderer& renderer, gm::view::MeshRenderer
     }
 
     if (!state.camera_initialized) {
-        float max_dist = 0.1f;
-        for (const auto& v : verts) {
+        // Distances of every drawn point from the orbit target.
+        std::vector<float> distances;
+        distances.reserve(verts.size() + highlight.size());
+        const auto add = [&](const gm::view::PointVertex& v) {
             const float dx = v.x - cx, dy = v.y - cy, dz = v.z - cz;
-            max_dist = std::max(max_dist, std::sqrt(dx * dx + dy * dy + dz * dz));
-        }
-        for (const auto& v : highlight) {
-            const float dx = v.x - cx, dy = v.y - cy, dz = v.z - cz;
-            max_dist = std::max(max_dist, std::sqrt(dx * dx + dy * dy + dz * dz));
+            distances.push_back(std::sqrt(dx * dx + dy * dy + dz * dz));
+        };
+        for (const auto& v : verts) add(v);
+        for (const auto& v : highlight) add(v);
+
+        // The 95th percentile, NOT the maximum. Fitting to the furthest
+        // single point makes the picture hostage to one outlier: on the
+        // March-2020 frame all 81 tickers collapse into one tight clump with
+        // three far-flung names, and framing the outliers renders the clump -
+        // the actual subject - as a few pixels. That looks like a broken
+        // renderer and is really the market clenching, which is worth
+        // seeing rather than being hidden by its own extremes.
+        //
+        // The outliers stay drawn; they simply stop deciding the zoom, and
+        // the user can scroll out to them. A boundary surface, when there is
+        // one, still frames in full below - it is the subject, not an
+        // outlier.
+        // The fallback is for a cloud with nothing to frame at all - a
+        // single point, or none. It must NOT act as a floor on a real
+        // measurement: 0.1 was one, and on the March-2020 frame the entire
+        // 81-name cloud is smaller than that, so the floor and not the data
+        // set the zoom and the clump still rendered as a smudge.
+        float max_dist = 0.0f;
+        if (!distances.empty()) {
+            const std::size_t idx =
+                static_cast<std::size_t>(0.95 * static_cast<double>(distances.size() - 1));
+            std::nth_element(distances.begin(), distances.begin() + static_cast<std::ptrdiff_t>(idx),
+                             distances.end());
+            max_dist = distances[idx];
         }
         // Whichever is bigger. A View B tube is a level set sampled in a
         // box padded by three bandwidths per axis, so it routinely extends
         // several times further than the path it encloses; fitting to the
         // points alone put the camera inside the surface.
         max_dist = std::max(max_dist, state.surface_radius);
+        // Only now, once both the points and the surface have had their say.
+        if (!(max_dist > 0.0f)) max_dist = 0.1f;
         state.camera.distance = max_dist * 2.5f;
         state.camera_initialized = true;
     }
@@ -492,6 +520,10 @@ int main(int argc, char** argv) {
     // verification picture taken from the only useless viewpoint is worse
     // than no picture, because it looks like evidence.
     std::string camera_spec;
+    // The other three tabs are unreachable from outside without this, so
+    // they get no screenshot, no smoke check, and no evidence they still
+    // render at all.
+    std::string tab_spec;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--start-frame") {
@@ -523,6 +555,12 @@ int main(int argc, char** argv) {
             track_ticker = argv[++i];
         } else if (arg == "--trajectory") {
             start_in_trajectory_mode = true;
+        } else if (arg == "--tab") {
+            if (i + 1 >= argc) {
+                spdlog::error("gm-view: --tab requires one of manifold, pairs, sectors, evolution");
+                return 1;
+            }
+            tab_spec = argv[++i];
         } else if (arg == "--camera") {
             if (i + 1 >= argc) {
                 spdlog::error("gm-view: --camera requires YAW,PITCH in degrees, e.g. --camera 40,25");
@@ -695,6 +733,22 @@ int main(int argc, char** argv) {
             // Applied after upload_frame, which is what sets the distance:
             // this overrides the ANGLE only, leaving the automatic framing
             // it just computed intact.
+            if (!tab_spec.empty()) {
+                // Names rather than indices: "--tab 2" would silently point
+                // somewhere else the moment a tab is inserted, and a
+                // screenshot of the wrong tab still looks like a screenshot.
+                const std::map<std::string, int> kTabs = {
+                    {"manifold", 0}, {"pairs", 1}, {"sectors", 2}, {"evolution", 3}};
+                const auto found = kTabs.find(tab_spec);
+                if (found == kTabs.end()) {
+                    spdlog::error("gm-view: --tab must be one of manifold, pairs, sectors, "
+                                   "evolution; got '{}'",
+                                   tab_spec);
+                    return 1;
+                }
+                state.selected_tab = found->second;
+            }
+
             if (!camera_spec.empty()) {
                 float yaw_deg = 0.0f, pitch_deg = 0.0f;
                 if (std::sscanf(camera_spec.c_str(), "%f,%f", &yaw_deg, &pitch_deg) != 2) {
@@ -787,9 +841,29 @@ int main(int argc, char** argv) {
                         state.loaded.frames[static_cast<std::size_t>(state.current_frame)].tickers.size());
             ImGui::TextDisabled("Left-drag to orbit, scroll to zoom.");
 
-            // Tab selection
+            // Tab selection. Self-contained on purpose: everything emitted
+            // between BeginTabBar and EndTabBar is laid out in the tab bar's
+            // own context, and this block used to enclose the entire control
+            // panel - so the surface checkbox, the axis pickers and each
+            // tab's content were all drawn over one another and over the tab
+            // strip itself. Nothing but the tab buttons belongs in here.
             ImGui::Separator();
-            ImGui::BeginTabBar("ViewTabs");
+            if (ImGui::BeginTabBar("ViewTabs")) {
+                if (ImGui::TabItemButton("Manifold", state.selected_tab == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                    state.selected_tab = 0;
+                }
+                if (ImGui::TabItemButton("2D Pairs", state.selected_tab == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                    state.selected_tab = 1;
+                }
+                if (ImGui::TabItemButton("3D Sectors", state.selected_tab == 2 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                    state.selected_tab = 2;
+                }
+                if (ImGui::TabItemButton("Evolution", state.selected_tab == 3 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                    state.selected_tab = 3;
+                }
+                ImGui::EndTabBar();
+            }
+            ImGui::Separator();
             if (state.surface_available) {
                 ImGui::Checkbox("Boundary surface", &state.show_surface);
                 if (state.show_surface) {
@@ -899,19 +973,6 @@ int main(int argc, char** argv) {
                 }
             }
 
-            if (ImGui::TabItemButton("Manifold", state.selected_tab == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
-                state.selected_tab = 0;
-            }
-            if (ImGui::TabItemButton("2D Pairs", state.selected_tab == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
-                state.selected_tab = 1;
-            }
-            if (ImGui::TabItemButton("3D Sectors", state.selected_tab == 2 ? ImGuiTabItemFlags_SetSelected : 0)) {
-                state.selected_tab = 2;
-            }
-            if (ImGui::TabItemButton("Evolution", state.selected_tab == 3 ? ImGuiTabItemFlags_SetSelected : 0)) {
-                state.selected_tab = 3;
-            }
-            ImGui::EndTabBar();
 
             // Tab-specific controls
             if (state.selected_tab == 1) {
