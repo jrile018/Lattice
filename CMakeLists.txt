@@ -52,6 +52,11 @@ if (MSVC)
     # somebody else's header and says nothing about this code.
     /wd4714
   )
+  # std::getenv and friends are standard C++; MSVC's C4996 deprecation of
+  # them is a vendor opinion this project does not share, and the suggested
+  # replacements are not portable. Scoped to a definition rather than
+  # /wd4996 so a genuine deprecation of OUR OWN code still warns.
+  target_compile_definitions(gm_project_options INTERFACE _CRT_SECURE_NO_WARNINGS)
 else()
   target_compile_options(gm_project_options INTERFACE
     -Wall -Wextra -Wconversion -Wsign-conversion -Wpedantic -Werror

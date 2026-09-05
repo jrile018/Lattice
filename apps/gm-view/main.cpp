@@ -750,8 +750,29 @@ int main(int argc, char** argv) {
             }
 
             if (!camera_spec.empty()) {
+                // Parsed with the C++ facilities rather than sscanf, which
+                // MSVC deprecates and which would also have accepted
+                // "40,25,junk" while quietly ignoring the tail. A flag that
+                // silently discards part of what was typed is a flag that
+                // produces the wrong picture without saying so.
                 float yaw_deg = 0.0f, pitch_deg = 0.0f;
-                if (std::sscanf(camera_spec.c_str(), "%f,%f", &yaw_deg, &pitch_deg) != 2) {
+                const auto comma = camera_spec.find(',');
+                bool camera_ok = comma != std::string::npos;
+                if (camera_ok) {
+                    try {
+                        std::size_t used_yaw = 0, used_pitch = 0;
+                        const std::string yaw_text = camera_spec.substr(0, comma);
+                        const std::string pitch_text = camera_spec.substr(comma + 1);
+                        yaw_deg = std::stof(yaw_text, &used_yaw);
+                        pitch_deg = std::stof(pitch_text, &used_pitch);
+                        // Every character has to have been consumed, or part
+                        // of the argument was thrown away.
+                        camera_ok = used_yaw == yaw_text.size() && used_pitch == pitch_text.size();
+                    } catch (const std::exception&) {
+                        camera_ok = false;
+                    }
+                }
+                if (!camera_ok) {
                     spdlog::error("gm-view: --camera needs YAW,PITCH in degrees, got '{}'",
                                    camera_spec);
                     return 1;
