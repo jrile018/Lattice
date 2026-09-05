@@ -604,6 +604,12 @@ runs/2026-08-29__w60_k3_mds_rmt/
     {date}_A.gmmesh              View A: the market's envelope that date
     {date}_B_{ticker}.gmmesh     View B: one ticker's own tube
   scores.parquet       date, ticker, view, estimator, depth, pvalue, inside
+                       view is "A" (market cross-section), "B" (one name's
+                       own embedding history) or "D" (one name's own
+                       valuation history, §6.6); depth is a SIGNED margin,
+                       distance minus the critical distance, so negative
+                       means inside. Which views a run scored is in the
+                       manifest as views_scored.
   excursions.parquet   ticker, start, end, peak_depth, reverted, had_earnings
   spreads.parquet      date, ticker, z, half_life, basket weights
   regime.parquet       date, structural_change, market_eigenvalue_share, vix
