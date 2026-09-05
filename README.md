@@ -331,10 +331,24 @@ Two further rules the chains follow, both learned from a real run:
   twelve-issuer run before and after, it raised FCF/P coverage from 64% to
   94% of ticker-days and EBITDA/EV from 39% to 57%. Rows that used an
   earlier-period figure are counted in the manifest.
-- **ADR-020's reference-test requirement is met for FastMCD** (against the
-  published Hawkins–Bradu–Kass example) **and for the fundamentals reader**
-  (against Apple's filed figures). Other in-house numerics named in that
-  ADR still rest on their own layer-1 tests.
+- **ADR-020's reference-test requirement is met for every routine it
+  names**, each against something derived independently of the code:
+
+  | Routine | Reference |
+  |---|---|
+  | Ledoit–Wolf shrinkage | hand-derived values on a fixed dataset |
+  | Marchenko–Pastur clipping | the published closed-form bulk edges |
+  | Classical MDS | exact recovery of planted coordinates |
+  | Procrustes | recovery of a known rotation and a known reflection |
+  | FastMCD | the published Hawkins–Bradu–Kass example |
+  | OU fitting | parameters recovered from simulated paths |
+  | Deflated Sharpe | **the paper's own worked numerical example** |
+  | NYSE calendar | published Easter dates and exchange holiday lists |
+  | Fundamentals reader | Apple's filed figures |
+
+  This entry previously claimed only two of these were covered. That was
+  understated, which is the same fault as overstating it in the other
+  direction — the README is meant to say what is true.
 - **View D has been fitted, but its results have not been studied.** The
   pipeline computes it; whether "cheap and diverging" actually separates
   from "deteriorating and diverging" in the scores is a research question
