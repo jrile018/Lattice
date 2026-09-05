@@ -593,6 +593,13 @@ runs/2026-08-29__w60_k3_mds_rmt/
                        columns past the third appear only when
                        geometry.embedding_dims > 3)
   edges.parquet        date, ticker_a, ticker_b, distance, in_mst
+  fundamentals.parquet ticker, period_end, available_date, net_income_ttm,
+                       ebitda_ttm, free_cash_flow_ttm, total_debt,
+                       cash_and_equivalents, shares_outstanding
+                       (gm-ingest; opt-in via ingest.fetch_fundamentals)
+  valuation.parquet    date, ticker, earnings_yield, ebitda_ev_yield,
+                       fcf_yield  (gm-features; each coordinate
+                       independently present or absent - §6.6)
   surfaces/            boundary meshes (versioned binary, §8.3)
     {date}_A.gmmesh              View A: the market's envelope that date
     {date}_B_{ticker}.gmmesh     View B: one ticker's own tube
@@ -604,6 +611,63 @@ runs/2026-08-29__w60_k3_mds_rmt/
   meta/profiles.json   per-ticker description, SIC, links (learn panel)
   report.html          gm-report output
 ```
+
+### 8.2.1 Accounting tag resolution, measured
+
+EBITDA and enterprise value are not XBRL concepts. They are assembled from
+tags that different filers use differently, and the assembly rules below
+were derived by downloading companyfacts for 40 S&P 500 issuers sampled
+across the alphabet and counting, not from reading the taxonomy.
+
+Per-issuer derivability of each coordinate:
+
+| Yield | Derivable | Blocked by |
+|---|---|---|
+| E/P | 40/40 | — |
+| FCF/P | 39/40 | APA reports no capex tag |
+| EBITDA/EV | 29/40 | 6 issuers have no operating-income subtotal (C, COP, DHI, EMR, FOX, STT), 5 no reachable long-term-debt tag (AKAM, BRK.B, DHI, GM, TTD), 1 no cash tag |
+
+Three rules follow, and each exists because its absence produces a wrong
+number rather than an error:
+
+1. **Availability is per COORDINATE, not per row.** Six of the eleven
+   EBITDA/EV misses are banks and similar, whose income statements do not
+   have an operating-income subtotal at all - a structural fact, not a data
+   gap. An all-or-nothing rule would discard their E/P and FCF/P too, for
+   28% of the sample.
+2. **A partial component sum is refused.** Where no depreciation-and-
+   amortisation aggregate is reported, the two components are added
+   together; if only one is present the concept is absent. Using
+   `us-gaap:Depreciation` alone - which an earlier version of the chain did,
+   for 3 of 12 issuers in the first real run - omits amortisation and
+   understates EBITDA silently.
+3. **Absence means zero only for genuinely optional concepts.** No
+   `ShortTermInvestments` tag means the issuer holds none; no `cash` tag is
+   a gap. Every substituted zero is counted, split between "this filer
+   reports none" and "not published by this date yet".
+
+Per-ticker-DAY coverage is lower than per-issuer coverage, because a
+concept can resolve for an issuer and still not be published as of an early
+date. Measured on a real run, among ticker-days that have a market
+capitalisation: E/P 100%, FCF/P 94%, EBITDA/EV 57%.
+
+Each field takes the most recent figure for its period **or any earlier
+period** that was public by the row's own `available_date`. This introduces
+no look-ahead - the availability cutoff is unchanged and only the period
+relaxes, backwards - and it is what an analyst reads off the latest filing
+to hand. It raised FCF/P from 64% to 94% of ticker-days and EBITDA/EV from
+39% to 57%, by fixing an artifact rather than a shortage: net income is
+re-reported as a comparative in nearly every later filing and so has many
+more vintages than capex does, and those extra anchors previously produced
+rows carrying net income and nothing else.
+
+**View D therefore defaults to fitting in two dimensions**
+(`earnings_yield`, `fcf_yield`). A boundary is fitted in one space, so
+every point must carry every configured axis; adding EBITDA/EV does not
+enrich the fit so much as shrink the cross-section it is fitted to. The
+count of ticker-days that costs is published either way.
+
+---
 
 ### 8.3 Surface naming and what each surface means
 

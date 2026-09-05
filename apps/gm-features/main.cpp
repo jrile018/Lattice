@@ -1,10 +1,12 @@
 #include "centrality.hpp"
 #include "returns.hpp"
+#include "valuation.hpp"
 
 #include <gm-core/stage_main.hpp>
 #include <gm-io/parquet.hpp>
 #include <gm-io/table.hpp>
 
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -12,8 +14,125 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <vector>
 
 namespace {
+
+/// Reads gm-ingest's fundamentals.parquet, joins it to the price panel under
+/// the point-in-time rule, and writes valuation.parquet.
+///
+/// A run whose ingest stage did not fetch fundamentals simply has no such
+/// file, and that is not an error: valuation is opt-in, and every stage
+/// downstream treats an absent valuation.parquet as "no View D", not as a
+/// failure. Saying so here rather than upstream keeps the decision in one
+/// place.
+gm::VoidResult write_valuation(const std::filesystem::path& output_dir, gm::Manifest& manifest) {
+    const std::filesystem::path ingest_dir = output_dir.parent_path() / "gm-ingest";
+    const std::filesystem::path fundamentals_path = ingest_dir / "fundamentals.parquet";
+    if (!std::filesystem::exists(fundamentals_path)) {
+        manifest.set_string("valuation", "skipped (no fundamentals.parquet upstream)");
+        return {};
+    }
+
+    auto fundamentals_table = gm::io::read_parquet(fundamentals_path);
+    if (!fundamentals_table) return tl::unexpected(fundamentals_table.error());
+
+    auto f_ticker = fundamentals_table->string_column("ticker");
+    if (!f_ticker) return tl::unexpected(f_ticker.error());
+    auto f_period_end = fundamentals_table->string_column("period_end");
+    if (!f_period_end) return tl::unexpected(f_period_end.error());
+    auto f_available = fundamentals_table->string_column("available_date");
+    if (!f_available) return tl::unexpected(f_available.error());
+    auto f_ni = fundamentals_table->double_column("net_income_ttm");
+    if (!f_ni) return tl::unexpected(f_ni.error());
+    auto f_ebitda = fundamentals_table->double_column("ebitda_ttm");
+    if (!f_ebitda) return tl::unexpected(f_ebitda.error());
+    auto f_fcf = fundamentals_table->double_column("free_cash_flow_ttm");
+    if (!f_fcf) return tl::unexpected(f_fcf.error());
+    auto f_debt = fundamentals_table->double_column("total_debt");
+    if (!f_debt) return tl::unexpected(f_debt.error());
+    auto f_cash = fundamentals_table->double_column("cash_and_equivalents");
+    if (!f_cash) return tl::unexpected(f_cash.error());
+    auto f_shares = fundamentals_table->double_column("shares_outstanding");
+    if (!f_shares) return tl::unexpected(f_shares.error());
+
+    std::vector<gm::features::FundamentalsRow> rows;
+    rows.reserve(f_ticker->size());
+    for (std::size_t i = 0; i < f_ticker->size(); ++i) {
+        gm::features::FundamentalsRow row;
+        row.ticker = (*f_ticker)[i];
+        row.period_end = (*f_period_end)[i];
+        row.available_date = (*f_available)[i];
+        row.net_income_ttm = (*f_ni)[i];
+        row.ebitda_ttm = (*f_ebitda)[i];
+        row.free_cash_flow_ttm = (*f_fcf)[i];
+        row.total_debt = (*f_debt)[i];
+        row.cash_and_equivalents = (*f_cash)[i];
+        row.shares_outstanding = (*f_shares)[i];
+        rows.push_back(std::move(row));
+    }
+
+    auto prices = gm::io::read_parquet(ingest_dir / "prices.parquet");
+    if (!prices) return tl::unexpected(prices.error());
+    auto p_ticker = prices->string_column("ticker");
+    if (!p_ticker) return tl::unexpected(p_ticker.error());
+    auto p_date = prices->string_column("date");
+    if (!p_date) return tl::unexpected(p_date.error());
+    // The UNADJUSTED close, deliberately - a reported share count is not
+    // split-adjusted, so multiplying it by adjclose gives a market cap wrong
+    // by every split since the filing. See valuation.hpp.
+    auto p_close = prices->double_column("close");
+    if (!p_close) return tl::unexpected(p_close.error());
+
+    const auto panel = gm::features::compute_valuation_panel(rows, *p_ticker, *p_date, *p_close);
+
+    std::vector<std::string> out_date, out_ticker;
+    std::vector<double> out_ep, out_ebitda_ev, out_fcf;
+    constexpr double kAbsent = std::numeric_limits<double>::quiet_NaN();
+    for (const auto& [ticker, series] : panel.yields) {
+        for (const auto& [date, y] : series) {
+            out_date.push_back(date);
+            out_ticker.push_back(ticker);
+            out_ep.push_back(y.earnings_yield.value_or(kAbsent));
+            out_ebitda_ev.push_back(y.ebitda_ev_yield.value_or(kAbsent));
+            out_fcf.push_back(y.fcf_yield.value_or(kAbsent));
+        }
+    }
+    const std::size_t rows_out = out_date.size();
+
+    gm::io::Table table;
+    if (auto r = table.add_string_column("date", std::move(out_date)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_string_column("ticker", std::move(out_ticker)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("earnings_yield", std::move(out_ep)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("ebitda_ev_yield", std::move(out_ebitda_ev)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("fcf_yield", std::move(out_fcf)); !r) return tl::unexpected(r.error());
+
+    auto write = gm::io::write_parquet(table, output_dir / "valuation.parquet");
+    if (!write) return tl::unexpected(write.error());
+
+    manifest.set_string("valuation", "enabled");
+    manifest.set_int("valuation_rows", static_cast<std::int64_t>(rows_out));
+    // Every ticker-day is accounted for in exactly one status, and every
+    // coordinate in exactly one per-axis outcome. Published because coverage
+    // that has to be inferred from missing rows is not coverage.
+    nlohmann::json statuses = nlohmann::json::object();
+    for (const auto& [status, count] : panel.status_counts) {
+        statuses[std::string{gm::features::to_string(status)}] = count;
+    }
+    manifest.set_json("valuation_status_counts", statuses);
+    nlohmann::json axes = nlohmann::json::object();
+    for (const auto& [axis, counts] : panel.yield_counts) {
+        nlohmann::json entry = nlohmann::json::object();
+        for (const auto& [status, count] : counts) {
+            entry[std::string{gm::features::to_string(status)}] = count;
+        }
+        axes[axis] = entry;
+    }
+    manifest.set_json("valuation_axis_counts", axes);
+
+    spdlog::info("gm-features: valuation {} ticker-days with at least one coordinate", rows_out);
+    return {};
+}
 
 gm::VoidResult run_gm_features(const gm::Config& /*config*/, const std::filesystem::path& output_dir,
                            gm::Manifest& manifest) {
@@ -183,6 +302,8 @@ gm::VoidResult run_gm_features(const gm::Config& /*config*/, const std::filesyst
         "returns_5d/21d/63d are real trailing adjclose returns from prices.parquet. "
         "beta and idiosyncratic_volatility are not yet implemented and are omitted "
         "(not shipped as NaN placeholders).");
+
+    if (auto r = write_valuation(output_dir, manifest); !r) return tl::unexpected(r.error());
 
     spdlog::info("gm-features: {} rows, {} unique tickers (all-time), {} GICS sectors, "
                  "returns_5d present {}/{}, returns_21d present {}/{}, returns_63d present {}/{}",

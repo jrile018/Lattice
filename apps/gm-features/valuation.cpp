@@ -9,12 +9,11 @@ namespace {
 // forbids NaN as a sentinel, so it is converted back into an explicit status
 // at the boundary rather than allowed to propagate into a coordinate, where
 // it would poison the covariance of every window containing that day.
-bool all_finite(const FundamentalsRow& f, double close_price) {
-    return std::isfinite(close_price) && std::isfinite(f.net_income_ttm) &&
-           std::isfinite(f.ebitda_ttm) && std::isfinite(f.free_cash_flow_ttm) &&
-           std::isfinite(f.total_debt) && std::isfinite(f.cash_and_equivalents) &&
-           std::isfinite(f.shares_outstanding);
-}
+//
+// Checked per COORDINATE rather than across the whole row: the fields differ
+// between the three yields, and an issuer missing one of them is not thereby
+// missing the others (see the ValuationYields comment).
+bool finite(double v) { return std::isfinite(v); }
 
 } // namespace
 
@@ -56,39 +55,72 @@ std::optional<std::size_t> select_as_of(const std::vector<FundamentalsRow>& rows
 ValuationPoint compute_valuation_yields(const FundamentalsRow& fundamentals, double close_price) {
     ValuationPoint out;
 
-    if (!all_finite(fundamentals, close_price)) {
-        out.status = ValuationStatus::kNonFiniteInput;
+    // Market cap is required by ALL three coordinates - two divide by it and
+    // the third has it inside enterprise value - so this one really is a
+    // row-level condition.
+    if (!finite(close_price) || !finite(fundamentals.shares_outstanding)) {
+        out.status = ValuationStatus::kNonPositiveMarketCap;
+        out.earnings_status = YieldStatus::kMissingInput;
+        out.ebitda_ev_status = YieldStatus::kMissingInput;
+        out.fcf_status = YieldStatus::kMissingInput;
         return out;
     }
-
     // Unadjusted close times as-reported share count. Using adjclose here
     // would be wrong by every split since the filing (see header).
     const double market_cap = close_price * fundamentals.shares_outstanding;
     if (!(close_price > 0.0) || !(fundamentals.shares_outstanding > 0.0) ||
         !(market_cap > 0.0)) {
         out.status = ValuationStatus::kNonPositiveMarketCap;
+        out.earnings_status = YieldStatus::kMissingInput;
+        out.ebitda_ev_status = YieldStatus::kMissingInput;
+        out.fcf_status = YieldStatus::kMissingInput;
         return out;
     }
 
-    const double enterprise_value =
-        market_cap + fundamentals.total_debt - fundamentals.cash_and_equivalents;
-    // EV <= 0 means the company trades below its net cash. Dividing by it
-    // would flip the sign of the coordinate, and a sign-flipped coordinate is
-    // not an outlier a robust estimator can absorb. Excluded, not clamped:
-    // the counts are published instead (ADR-022).
-    if (!(enterprise_value > 0.0)) {
-        out.status = ValuationStatus::kNonPositiveEnterpriseValue;
-        return out;
+    // ---- E/P -------------------------------------------------------------
+    if (finite(fundamentals.net_income_ttm)) {
+        out.yields.earnings_yield = fundamentals.net_income_ttm / market_cap;
+    } else {
+        out.earnings_status = YieldStatus::kMissingInput;
     }
 
-    // A small-but-positive enterprise value is deliberately left alone here,
-    // however large the resulting yield. FastMCD downstream exists to ignore
-    // a minority of extreme points; flooring the denominator to keep the
-    // number tidy would be the eigenvalue-floor mistake in a new place.
-    out.status = ValuationStatus::kOk;
-    out.yields.earnings_yield = fundamentals.net_income_ttm / market_cap;
-    out.yields.ebitda_ev_yield = fundamentals.ebitda_ttm / enterprise_value;
-    out.yields.fcf_yield = fundamentals.free_cash_flow_ttm / market_cap;
+    // ---- FCF/P -----------------------------------------------------------
+    if (finite(fundamentals.free_cash_flow_ttm)) {
+        out.yields.fcf_yield = fundamentals.free_cash_flow_ttm / market_cap;
+    } else {
+        out.fcf_status = YieldStatus::kMissingInput;
+    }
+
+    // ---- EBITDA/EV -------------------------------------------------------
+    // The weak axis, and the only one with a denominator that can go
+    // non-positive. Both of its failure modes are per-coordinate.
+    if (!finite(fundamentals.ebitda_ttm) || !finite(fundamentals.total_debt) ||
+        !finite(fundamentals.cash_and_equivalents)) {
+        out.ebitda_ev_status = YieldStatus::kMissingInput;
+    } else {
+        const double enterprise_value =
+            market_cap + fundamentals.total_debt - fundamentals.cash_and_equivalents;
+        // EV <= 0 means the company trades below its net cash. Dividing by it
+        // would flip the sign of the coordinate, and a sign-flipped coordinate
+        // is not an outlier a robust estimator can absorb. Excluded, not
+        // clamped: the counts are published instead (ADR-022).
+        //
+        // This no longer discards the other two coordinates with it, which
+        // the previous version did - E/P and FCF/P do not involve enterprise
+        // value at all and are unaffected by its sign.
+        if (!(enterprise_value > 0.0)) {
+            out.ebitda_ev_status = YieldStatus::kNonPositiveDenominator;
+        } else {
+            // A small-but-positive enterprise value is deliberately left alone,
+            // however large the resulting yield. FastMCD downstream exists to
+            // ignore a minority of extreme points; flooring the denominator to
+            // keep the number tidy would be the eigenvalue-floor mistake in a
+            // new place.
+            out.yields.ebitda_ev_yield = fundamentals.ebitda_ttm / enterprise_value;
+        }
+    }
+
+    out.status = out.yields.any() ? ValuationStatus::kOk : ValuationStatus::kNoYieldComputable;
     return out;
 }
 
@@ -133,6 +165,9 @@ ValuationPanel compute_valuation_panel(const std::vector<FundamentalsRow>& funda
         const ValuationPoint point =
             compute_valuation_yields(group->second[*chosen], price_close[i]);
         ++panel.status_counts[point.status];
+        ++panel.yield_counts["earnings_yield"][point.earnings_status];
+        ++panel.yield_counts["ebitda_ev_yield"][point.ebitda_ev_status];
+        ++panel.yield_counts["fcf_yield"][point.fcf_status];
         if (point.status == ValuationStatus::kOk) panel.yields[ticker][date] = point.yields;
     }
     return panel;
@@ -144,12 +179,22 @@ std::string_view to_string(ValuationStatus status) {
             return "ok";
         case ValuationStatus::kNoFundamentalsAvailable:
             return "no_fundamentals_available";
-        case ValuationStatus::kNonFiniteInput:
-            return "non_finite_input";
         case ValuationStatus::kNonPositiveMarketCap:
             return "non_positive_market_cap";
-        case ValuationStatus::kNonPositiveEnterpriseValue:
-            return "non_positive_enterprise_value";
+        case ValuationStatus::kNoYieldComputable:
+            return "no_yield_computable";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(YieldStatus status) {
+    switch (status) {
+        case YieldStatus::kOk:
+            return "ok";
+        case YieldStatus::kMissingInput:
+            return "missing_input";
+        case YieldStatus::kNonPositiveDenominator:
+            return "non_positive_denominator";
     }
     return "unknown";
 }

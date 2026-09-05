@@ -26,6 +26,15 @@ cache_dir = "data/raw/price_cache"
 liquidity_window_days = 60
 liquidity_top_n = 100
 
+# SEC XBRL fundamentals (ADR-022, ADR 8.2.1). Off by default: one request
+# per issuer, each companyfacts document 10-40 MB. Fetched for the LIQUID
+# universe only - the ~81 names everything downstream reads - not the
+# ~503-name candidate pool.
+#
+#   fetch_fundamentals       = true
+#   fundamentals_max_issuers = 12    (testing only; -1 or absent = no cap)
+fetch_fundamentals = false
+
 [geometry]
 window_days = 60
 embedding_dims = 3
@@ -47,6 +56,19 @@ view_b_lookback_days = 756
 #   view_b_mesh_tickers    = ["AAPL", "NVDA", "XOM"]
 #   view_b_mesh_stride     = 5      View B: every Nth dated point, per name
 #
+# View D (ADR-022): the same causal question in valuation space. Needs
+# gm-features' valuation.parquet, which needs ingest.fetch_fundamentals
+# above; without it the view is skipped and the manifest says so.
+#
+#   view_d_axes = ["earnings_yield", "fcf_yield"]   (the default)
+#
+# Adding "ebitda_ev_yield" is one edit, and it is a trade rather than an
+# improvement: measured per ticker-day, E/P is present for 100% of days
+# with a market cap, FCF/P for 94%, EBITDA/EV for 57%. A boundary is fitted
+# in ONE space, so every point must carry every configured axis - the third
+# axis shrinks the cross-section rather than enriching the fit. The count
+# of ticker-days it costs is in the manifest either way.
+
 # View B is per-ticker and strided because it multiplies twice over: 81
 # names x 4129 dates is ~334k files, and each View B mesh is roughly 30x
 # the work of a View A one (fitted to ~756 training points against ~81).

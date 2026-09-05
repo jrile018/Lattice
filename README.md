@@ -225,7 +225,7 @@ comparable across a change to `embedding_dims` (Procrustes aligns in the
 full k), and above three dimensions the drawn surface is a shadow of the
 scored boundary rather than the boundary itself.
 
-### In progress — ADR-022, the valuation geometry (View D)
+### ADR-022, the valuation geometry (View D)
 
 A second robust ellipsoid per equity, over point-in-time valuation yields
 rather than embedding coordinates, so the pipeline can distinguish "this
@@ -236,33 +236,80 @@ difference, and it is the difference the reversion gate turns on.
 | Piece | State |
 |---|---|
 | ADR-022 + §6.6 (the design) | Written down, in this repo, not in a conversation |
-| `gm::features::valuation` — the as-of rule and the three yields | Built, 19 tests, 6 deliberate defects reintroduced and caught |
-| `gm::data::fundamentals` — the SEC XBRL reader | Built, 14 tests, 7 deliberate defects reintroduced and caught |
-| `gm-ingest` wiring → `fundamentals.parquet` | **Not started** — blocked, see below |
-| View D fit in `gm-boundaries` | **Not started** — reuses the existing FastMCD path unchanged |
+| `gm::features::valuation` — the as-of rule and the three yields | Built, 21 tests, per-coordinate availability |
+| `gm::data::fundamentals` — the SEC XBRL reader | Built, tested |
+| Accounting tag chains — the thing that was blocking it | Built, 15 tests, **14 deliberate defects reintroduced and caught** |
+| `gm-ingest` → `fundamentals.parquet` | Built, run against real SEC filings |
+| `gm-features` → `valuation.parquet` | Built |
+| View D fit in `gm-boundaries` | Built — same estimators and same causal window as View B |
+
+**The blocker was real and it is now measured rather than guessed.** EBITDA
+and enterprise value are not XBRL concepts: they have to be assembled from
+tags that different filers use differently, and some do not report at all.
+Downloading companyfacts for 40 S&P issuers and counting gives the honest
+answer, per issuer:
+
+| Yield | Derivable for | Why the misses |
+|---|---|---|
+| **E/P** | 40/40 (100%) | — |
+| **FCF/P** | 39/40 (98%) | one issuer reports no capex tag |
+| **EBITDA/EV** | 29/40 (72%) | mostly **structural**: banks report no operating-income subtotal, because that is not how a bank's income statement is built |
+
+That measurement changed the design rather than just documenting it. The
+original rule rejected a whole ticker-day if any field was absent, which
+would have thrown away E/P and FCF/P — perfectly computable — for 28% of
+issuers, over a third coordinate that does not apply to them. Availability
+is now **per coordinate**, and each axis's coverage is published separately
+so one blended figure cannot hide which axis is the weak one.
+
+Two further rules the chains follow, both learned from a real run:
+
+- **A partial sum is refused.** Three of twelve issuers reported no
+  depreciation-and-amortisation aggregate. Falling through to
+  `us-gaap:Depreciation` alone silently omitted amortisation and understated
+  EBITDA. The chain now prefers a reported aggregate, else adds *both*
+  components, else reports the concept absent. Half an add-back is a
+  plausible number that is quietly too small, which is worse than none.
+- **Absence means zero only where absence means zero.** No
+  `ShortTermInvestments` tag almost certainly means the issuer holds none —
+  nobody files a zero, they omit the line. No `cash` tag is a gap, and
+  reading *that* as zero would fabricate a balance sheet. Every substituted
+  zero is counted, and split between "this filer reports none" and "not
+  published by this date yet", because those call for different responses.
 
 ### Known gaps, stated plainly
 
-- **Accounting tag mapping is the blocker, and it is a research problem
-  rather than a coding one.** EBITDA is not an XBRL concept — it has to be
-  assembled from operating income plus depreciation, and D&A appears under
-  three different tags for a single issuer. There is no combined total-debt
-  tag. `ShortTermInvestments` is absent for at least one large filer, which
-  understates net cash and therefore distorts enterprise value. Net effect:
-  **`E/P` and `FCF/P` are derivable from unambiguous tags today;
-  `EBITDA/EV` is not.** It needs a documented fallback chain with per-field
-  coverage reported, not a silent guess.
-- **XBRL coverage before ~2011 is unmeasured.** The taxonomy was phased in
-  from 2009 for large filers, so the early years of ADR-002's 2010 start
-  need a per-issuer coverage check. That becomes a reported dataset
-  statistic; it is not something to assume.
+- **EBITDA/EV is the weak axis and always will be.** Per ticker-day on a
+  real run, E/P is present for 100% of days that have a market cap, FCF/P
+  for 94%, EBITDA/EV for 57%. View D therefore defaults to fitting in
+  `[earnings_yield, fcf_yield]`. Adding the third axis is one config key,
+  and it does not enrich the fit so much as shrink the cross-section it is
+  fitted to — the run reports how many ticker-days that costs, so the trade
+  is visible rather than assumed.
+- **A row's coordinates can describe different periods.** Net income is
+  re-reported as a comparative in nearly every later filing, so it has far
+  more vintages than capex or operating income do. Requiring an exact period
+  match meant such a vintage produced a row carrying net income and nothing
+  else — costing that day its other coordinates entirely, since the consumer
+  keeps one row per ticker-day. Each field now takes the most recent figure
+  for its period **or earlier** that was public by the row's own
+  `available_date`. No look-ahead is introduced: the availability cutoff is
+  unchanged and only the period relaxes, backwards. It raised FCF/P coverage
+  from 64% to 94% of ticker-days and EBITDA/EV from 39% to 57%. Rows that
+  used an earlier-period figure are counted in the manifest.
 - **ADR-020's reference-test requirement is met for FastMCD** (against the
   published Hawkins–Bradu–Kass example) **and for the fundamentals reader**
   (against Apple's filed figures). Other in-house numerics named in that
   ADR still rest on their own layer-1 tests.
-- **View D has never been fitted to real data**, because there is no
-  fundamentals artifact yet. Nothing in this repo claims it works — only
-  that the pieces beneath it do, individually.
+- **View D has been fitted, but its results have not been studied.** The
+  pipeline computes it; whether "cheap and diverging" actually separates
+  from "deteriorating and diverging" in the scores is a research question
+  this repo has not answered, and nothing here claims it has.
+- **XBRL coverage before ~2011 is unmeasured.** The taxonomy was phased in
+  from 2009 for large filers, so the early years of ADR-002's 2010 start
+  need a per-issuer coverage check. The run now reports how many rows read
+  an absent balance-sheet item as zero because nothing had been published
+  yet, which is the raw material for that check but is not the check.
 
 ### How the tests here are meant to be read
 

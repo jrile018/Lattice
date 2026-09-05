@@ -15,6 +15,7 @@ using gm::features::compute_valuation_yields;
 using gm::features::FundamentalsRow;
 using gm::features::select_as_of;
 using gm::features::ValuationStatus;
+using gm::features::YieldStatus;
 
 namespace {
 
@@ -208,9 +209,12 @@ TEST_CASE("compute_valuation_yields: values are the hand-computed ones",
     // EV = 5.0e9 + 1.0e9 - 0.5e9 = 5.5e9.
     const auto point = compute_valuation_yields(sample_row(), 50.0);
     REQUIRE(point.status == ValuationStatus::kOk);
-    CHECK(std::abs(point.yields.earnings_yield - 250e6 / 5.0e9) < kTol);
-    CHECK(std::abs(point.yields.ebitda_ev_yield - 700e6 / 5.5e9) < kTol);
-    CHECK(std::abs(point.yields.fcf_yield - 400e6 / 5.0e9) < kTol);
+    REQUIRE(point.yields.earnings_yield.has_value());
+    REQUIRE(point.yields.ebitda_ev_yield.has_value());
+    REQUIRE(point.yields.fcf_yield.has_value());
+    CHECK(std::abs(*point.yields.earnings_yield - 250e6 / 5.0e9) < kTol);
+    CHECK(std::abs(*point.yields.ebitda_ev_yield - 700e6 / 5.5e9) < kTol);
+    CHECK(std::abs(*point.yields.fcf_yield - 400e6 / 5.0e9) < kTol);
 }
 
 TEST_CASE("compute_valuation_yields: market cap uses the price given, so the yields move daily",
@@ -222,10 +226,10 @@ TEST_CASE("compute_valuation_yields: market cap uses the price given, so the yie
     const auto dear = compute_valuation_yields(row, 100.0);
     REQUIRE(cheap.status == ValuationStatus::kOk);
     REQUIRE(dear.status == ValuationStatus::kOk);
-    CHECK(cheap.yields.earnings_yield > dear.yields.earnings_yield);
+    CHECK(*cheap.yields.earnings_yield > *dear.yields.earnings_yield);
     // Halving the price exactly doubles the earnings yield.
     const auto base = compute_valuation_yields(row, 50.0);
-    CHECK(std::abs(cheap.yields.earnings_yield - 2.0 * base.yields.earnings_yield) < kTol);
+    CHECK(std::abs(*cheap.yields.earnings_yield - 2.0 * *base.yields.earnings_yield) < kTol);
 }
 
 TEST_CASE("compute_valuation_yields: earnings yield stays finite and continuous through zero",
@@ -238,33 +242,82 @@ TEST_CASE("compute_valuation_yields: earnings yield stays finite and continuous 
         row.net_income_ttm = earnings;
         const auto point = compute_valuation_yields(row, 50.0);
         REQUIRE(point.status == ValuationStatus::kOk);
-        const double y = point.yields.earnings_yield;
+        REQUIRE(point.yields.earnings_yield.has_value());
+        const double y = *point.yields.earnings_yield;
         INFO("earnings = " << earnings << " -> E/P = " << y);
         CHECK(std::isfinite(y));
         CHECK(y < previous); // monotone decreasing, no sign discontinuity
         previous = y;
     }
     row.net_income_ttm = 0.0;
-    CHECK(compute_valuation_yields(row, 50.0).yields.earnings_yield == 0.0);
+    CHECK(*compute_valuation_yields(row, 50.0).yields.earnings_yield == 0.0);
 }
 
-TEST_CASE("compute_valuation_yields: a non-positive enterprise value has no coordinate at all",
+TEST_CASE("compute_valuation_yields: a non-positive enterprise value costs EBITDA/EV only",
           "[gm-features][valuation]") {
     // A company trading below its net cash. EBITDA/EV would flip sign, and a
     // sign-flipped coordinate is not an outlier a robust estimator can
     // absorb - it is a different quantity pointing the wrong way. ADR-022
-    // excludes the ticker-day rather than clamping the denominator.
+    // excludes it rather than clamping the denominator.
+    //
+    // But ONLY it. E/P and FCF/P divide by market capitalisation, which is
+    // strictly positive here and has nothing to do with enterprise value.
+    // The previous version of this code discarded all three, which threw
+    // away two good coordinates for a condition that does not touch them.
     auto row = sample_row();
     row.cash_and_equivalents = 8000e6; // EV = 5.0e9 + 1.0e9 - 8.0e9 < 0
     const auto point = compute_valuation_yields(row, 50.0);
-    CHECK(point.status == ValuationStatus::kNonPositiveEnterpriseValue);
+    CHECK(point.status == ValuationStatus::kOk);
+    CHECK(point.ebitda_ev_status == YieldStatus::kNonPositiveDenominator);
+    CHECK_FALSE(point.yields.ebitda_ev_yield.has_value());
+    REQUIRE(point.yields.earnings_yield.has_value());
+    REQUIRE(point.yields.fcf_yield.has_value());
+    CHECK(std::abs(*point.yields.earnings_yield - 250e6 / 5.0e9) < kTol);
+    CHECK(std::abs(*point.yields.fcf_yield - 400e6 / 5.0e9) < kTol);
 
     SECTION("exactly zero is also excluded, not divided by") {
         auto zero_ev = sample_row();
         zero_ev.cash_and_equivalents = 6000e6; // EV = 5.0e9 + 1.0e9 - 6.0e9 = 0
-        CHECK(compute_valuation_yields(zero_ev, 50.0).status ==
-              ValuationStatus::kNonPositiveEnterpriseValue);
+        const auto p = compute_valuation_yields(zero_ev, 50.0);
+        CHECK(p.ebitda_ev_status == YieldStatus::kNonPositiveDenominator);
+        CHECK_FALSE(p.yields.ebitda_ev_yield.has_value());
+        CHECK(p.yields.earnings_yield.has_value());
     }
+}
+
+TEST_CASE("compute_valuation_yields: a bank with no operating-income subtotal still gets E/P "
+          "and FCF/P",
+          "[gm-features][valuation]") {
+    // The case this whole design change exists for. Measured across 40 real
+    // S&P issuers: EBITDA/EV is derivable for 29, and of the eleven misses,
+    // five (C, COP, DHI, EMR, FOX, STT among them) lack an operating-income
+    // subtotal because that is not how their income statement is built.
+    // Their net income, cash flow and share count are all present and
+    // perfectly usable.
+    auto row = sample_row();
+    row.ebitda_ttm = std::numeric_limits<double>::quiet_NaN();
+    const auto point = compute_valuation_yields(row, 50.0);
+    CHECK(point.status == ValuationStatus::kOk);
+    CHECK(point.ebitda_ev_status == YieldStatus::kMissingInput);
+    CHECK_FALSE(point.yields.ebitda_ev_yield.has_value());
+    CHECK(point.earnings_status == YieldStatus::kOk);
+    CHECK(point.fcf_status == YieldStatus::kOk);
+    REQUIRE(point.yields.earnings_yield.has_value());
+    CHECK(std::abs(*point.yields.earnings_yield - 250e6 / 5.0e9) < kTol);
+}
+
+TEST_CASE("compute_valuation_yields: a row with no computable coordinate at all is reported",
+          "[gm-features][valuation]") {
+    // Per-coordinate availability must not become "always kOk". A row whose
+    // every numerator is absent has nothing to contribute and says so.
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    auto row = sample_row();
+    row.net_income_ttm = nan;
+    row.free_cash_flow_ttm = nan;
+    row.ebitda_ttm = nan;
+    const auto point = compute_valuation_yields(row, 50.0);
+    CHECK(point.status == ValuationStatus::kNoYieldComputable);
+    CHECK_FALSE(point.yields.any());
 }
 
 TEST_CASE("compute_valuation_yields: a small but positive EV is left alone, not clamped",
@@ -276,8 +329,9 @@ TEST_CASE("compute_valuation_yields: a small but positive EV is left alone, not 
     row.cash_and_equivalents = 5999e6; // EV = 1.0e6, tiny but positive
     const auto point = compute_valuation_yields(row, 50.0);
     REQUIRE(point.status == ValuationStatus::kOk);
-    CHECK(std::abs(point.yields.ebitda_ev_yield - 700e6 / 1.0e6) < 1e-6);
-    CHECK(point.yields.ebitda_ev_yield > 100.0); // genuinely enormous, and kept
+    REQUIRE(point.yields.ebitda_ev_yield.has_value());
+    CHECK(std::abs(*point.yields.ebitda_ev_yield - 700e6 / 1.0e6) < 1e-6);
+    CHECK(*point.yields.ebitda_ev_yield > 100.0); // genuinely enormous, and kept
 }
 
 TEST_CASE("compute_valuation_yields: non-positive price or share count is rejected",
@@ -298,20 +352,47 @@ TEST_CASE("compute_valuation_yields: an absent source field is reported, never u
     // Free fundamentals sources leave fields empty; a Parquet double column
     // carries that as NaN. NaN is never a sentinel in this codebase
     // (ADR-019), so it has to be turned back into an explicit status here
-    // rather than propagated into a coordinate.
+    // rather than propagated into a coordinate. What changed is the SCOPE of
+    // that report: it now names the coordinate the field belongs to.
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const double inf = std::numeric_limits<double>::infinity();
     for (double bad : {nan, inf, -inf}) {
-        auto row = sample_row();
-        row.ebitda_ttm = bad;
-        CHECK(compute_valuation_yields(row, 50.0).status == ValuationStatus::kNonFiniteInput);
+        // Each of the three enterprise-value inputs costs EBITDA/EV alone.
+        for (double FundamentalsRow::*field :
+             {&FundamentalsRow::ebitda_ttm, &FundamentalsRow::total_debt,
+              &FundamentalsRow::cash_and_equivalents}) {
+            auto row = sample_row();
+            row.*field = bad;
+            const auto point = compute_valuation_yields(row, 50.0);
+            CHECK(point.status == ValuationStatus::kOk);
+            CHECK(point.ebitda_ev_status == YieldStatus::kMissingInput);
+            CHECK(point.yields.earnings_yield.has_value());
+            CHECK(point.yields.fcf_yield.has_value());
+        }
 
-        auto row2 = sample_row();
-        row2.total_debt = bad;
-        CHECK(compute_valuation_yields(row2, 50.0).status == ValuationStatus::kNonFiniteInput);
+        auto no_earnings = sample_row();
+        no_earnings.net_income_ttm = bad;
+        const auto ne = compute_valuation_yields(no_earnings, 50.0);
+        CHECK(ne.earnings_status == YieldStatus::kMissingInput);
+        CHECK_FALSE(ne.yields.earnings_yield.has_value());
+        CHECK(ne.yields.fcf_yield.has_value()); // unaffected
 
+        auto no_fcf = sample_row();
+        no_fcf.free_cash_flow_ttm = bad;
+        const auto nf = compute_valuation_yields(no_fcf, 50.0);
+        CHECK(nf.fcf_status == YieldStatus::kMissingInput);
+        CHECK_FALSE(nf.yields.fcf_yield.has_value());
+        CHECK(nf.yields.earnings_yield.has_value()); // unaffected
+
+        // The price and the share count are inputs to EVERY coordinate, so
+        // these really are row-level.
         CHECK(compute_valuation_yields(sample_row(), bad).status ==
-              ValuationStatus::kNonFiniteInput);
+              ValuationStatus::kNonPositiveMarketCap);
+        auto bad_shares = sample_row();
+        bad_shares.shares_outstanding = bad;
+        const auto bs = compute_valuation_yields(bad_shares, 50.0);
+        CHECK(bs.status == ValuationStatus::kNonPositiveMarketCap);
+        CHECK_FALSE(bs.yields.any());
     }
 }
 
@@ -352,7 +433,7 @@ TEST_CASE("compute_valuation_panel: tickers are independent", "[gm-features][val
     CHECK(panel.yields.at("AAA").count("2024-06-01") == 1);
     CHECK(panel.yields.at("BBB").count("2024-06-01") == 0); // not published until August
     CHECK(panel.yields.at("BBB").count("2024-09-01") == 1);
-    CHECK(std::abs(panel.yields.at("BBB").at("2024-09-01").earnings_yield - 500e6 / 5.0e9) < kTol);
+    CHECK(std::abs(*panel.yields.at("BBB").at("2024-09-01").earnings_yield - 500e6 / 5.0e9) < kTol);
 }
 
 TEST_CASE("compute_valuation_panel: every ticker-day is accounted for in exactly one status",
@@ -374,9 +455,24 @@ TEST_CASE("compute_valuation_panel: every ticker-day is accounted for in exactly
     CHECK(total == static_cast<std::int64_t>(tickers.size()));
 
     CHECK(panel.status_counts.at(ValuationStatus::kNoFundamentalsAvailable) == 3); // AAA/BBB 05-09, CCC
-    CHECK(panel.status_counts.at(ValuationStatus::kNonPositiveEnterpriseValue) == 1);
     CHECK(panel.status_counts.at(ValuationStatus::kNonPositiveMarketCap) == 1);
-    CHECK(panel.status_counts.count(ValuationStatus::kOk) == 0);
+    // BBB's negative enterprise value no longer costs it the row: it keeps
+    // E/P and FCF/P and loses only EBITDA/EV, so this day is kOk.
+    CHECK(panel.status_counts.at(ValuationStatus::kOk) == 1);
+
+    // And the per-coordinate counts have to tally the same way, over the
+    // ticker-days that got as far as a market cap (all but the three with no
+    // fundamentals published).
+    const std::int64_t priced = static_cast<std::int64_t>(tickers.size()) -
+                                panel.status_counts.at(ValuationStatus::kNoFundamentalsAvailable);
+    for (const char* axis : {"earnings_yield", "ebitda_ev_yield", "fcf_yield"}) {
+        std::int64_t axis_total = 0;
+        for (const auto& [status, count] : panel.yield_counts.at(axis)) axis_total += count;
+        INFO("axis = " << axis);
+        CHECK(axis_total == priced);
+    }
+    CHECK(panel.yield_counts.at("ebitda_ev_yield").at(YieldStatus::kNonPositiveDenominator) == 1);
+    CHECK(panel.yield_counts.at("earnings_yield").at(YieldStatus::kOk) == 1);
 }
 
 TEST_CASE("compute_valuation_panel: mismatched price column lengths yield nothing rather than "
@@ -390,15 +486,22 @@ TEST_CASE("compute_valuation_panel: mismatched price column lengths yield nothin
     const auto panel = compute_valuation_panel(fundamentals, tickers, dates, close);
     CHECK(panel.yields.empty());
     CHECK(panel.status_counts.empty());
+    CHECK(panel.yield_counts.empty());
 }
 
 TEST_CASE("to_string covers every status", "[gm-features][valuation]") {
     for (ValuationStatus s : {ValuationStatus::kOk, ValuationStatus::kNoFundamentalsAvailable,
-                              ValuationStatus::kNonFiniteInput,
                               ValuationStatus::kNonPositiveMarketCap,
-                              ValuationStatus::kNonPositiveEnterpriseValue}) {
+                              ValuationStatus::kNoYieldComputable}) {
         const std::string_view name = gm::features::to_string(s);
         INFO("status = " << static_cast<int>(s));
+        CHECK_FALSE(name.empty());
+        CHECK(name != "unknown");
+    }
+    for (YieldStatus s : {YieldStatus::kOk, YieldStatus::kMissingInput,
+                          YieldStatus::kNonPositiveDenominator}) {
+        const std::string_view name = gm::features::to_string(s);
+        INFO("yield status = " << static_cast<int>(s));
         CHECK_FALSE(name.empty());
         CHECK(name != "unknown");
     }

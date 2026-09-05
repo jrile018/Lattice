@@ -62,6 +62,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <optional>
@@ -372,6 +373,204 @@ void score_both_estimators(ScoreRows& rows, const Eigen::MatrixXd& training, con
     }
 }
 
+/// Which valuation coordinates View D is fitted in.
+///
+/// Configurable, and defaulting to the two that are nearly always
+/// derivable, because the third is not. Measured on a real run: of the
+/// ticker-days that have a market capitalisation at all, E/P is present for
+/// 100%, FCF/P for 94%, and EBITDA/EV for 57% - the last because enterprise
+/// value needs a debt and cash position that a good many issuers either
+/// report under tags outside the chain or, for banks, structure entirely
+/// differently.
+///
+/// A boundary has to be fitted in ONE space, so every point in the cloud
+/// must carry every configured axis. Adding EBITDA/EV therefore does not
+/// enrich the fit - it shrinks the cross-section it is fitted to, by a lot.
+/// That is a trade worth making deliberately and not by default, so the
+/// count of ticker-days it costs is published either way.
+gm::Result<std::vector<std::string>> read_view_d_axes(const gm::Config& config) {
+    static const std::vector<std::string> kKnown = {"earnings_yield", "ebitda_ev_yield",
+                                                     "fcf_yield"};
+    std::vector<std::string> axes;
+    const auto* boundaries = config.raw()["boundaries"].as_table();
+    const toml::node* node = boundaries != nullptr ? boundaries->get("view_d_axes") : nullptr;
+    if (node == nullptr) return std::vector<std::string>{"earnings_yield", "fcf_yield"};
+
+    const auto* array = node->as_array();
+    if (array == nullptr) {
+        return tl::unexpected(gm::Error::make(
+            gm::ErrorCode::kInvalidArgument,
+            "boundaries.view_d_axes must be an array of coordinate names",
+            R"(e.g. view_d_axes = ["earnings_yield", "fcf_yield"])"));
+    }
+    for (const auto& element : *array) {
+        const auto* value = element.as_string();
+        if (value == nullptr) {
+            return tl::unexpected(gm::Error::make(gm::ErrorCode::kInvalidArgument,
+                                                   "boundaries.view_d_axes has a non-string entry"));
+        }
+        const std::string axis = value->get();
+        if (std::find(kKnown.begin(), kKnown.end(), axis) == kKnown.end()) {
+            return tl::unexpected(gm::Error::make(
+                gm::ErrorCode::kInvalidArgument, "unknown View D axis", axis));
+        }
+        if (std::find(axes.begin(), axes.end(), axis) != axes.end()) {
+            // A repeated axis makes the covariance exactly singular, which
+            // fails deep inside an estimator with a message about
+            // conditioning rather than about the config that caused it.
+            return tl::unexpected(gm::Error::make(gm::ErrorCode::kInvalidArgument,
+                                                   "boundaries.view_d_axes repeats an axis", axis));
+        }
+        axes.push_back(axis);
+    }
+    if (axes.empty()) {
+        return tl::unexpected(gm::Error::make(gm::ErrorCode::kInvalidArgument,
+                                               "boundaries.view_d_axes is empty"));
+    }
+    return axes;
+}
+
+/// Fits and scores View D against gm-features' valuation.parquet.
+///
+/// A run without that artifact simply has no View D - valuation is opt-in
+/// upstream - and that is recorded, not treated as a failure.
+gm::VoidResult score_view_d(const gm::Config& config, const std::filesystem::path& output_dir,
+                             ScoreRows& rows, gm::Manifest& manifest, double alpha,
+                             std::int64_t lookback) {
+    const auto valuation_path =
+        output_dir.parent_path() / "gm-features" / "valuation.parquet";
+    if (!std::filesystem::exists(valuation_path)) {
+        manifest.set_string("view_d", "skipped (no valuation.parquet upstream)");
+        return {};
+    }
+
+    auto axes = read_view_d_axes(config);
+    if (!axes) return tl::unexpected(axes.error()); // already validated up front
+
+    auto table = gm::io::read_parquet(valuation_path);
+    if (!table) return tl::unexpected(table.error());
+    auto date_col = table->string_column("date");
+    if (!date_col) return tl::unexpected(date_col.error());
+    auto ticker_col = table->string_column("ticker");
+    if (!ticker_col) return tl::unexpected(ticker_col.error());
+
+    std::vector<std::vector<double>> axis_cols;
+    for (const std::string& axis : *axes) {
+        auto col = table->double_column(axis);
+        if (!col) return tl::unexpected(col.error());
+        axis_cols.push_back(std::move(*col));
+    }
+
+    // ticker -> its valuation history, ascending by date.
+    std::map<std::string, std::vector<FramePoint>> by_ticker;
+    std::int64_t dropped_incomplete = 0;
+    for (std::size_t i = 0; i < date_col->size(); ++i) {
+        FramePoint fp;
+        fp.date = (*date_col)[i];
+        fp.coords.reserve(axis_cols.size());
+        bool complete = true;
+        for (const auto& col : axis_cols) {
+            const double v = col[i];
+            // An absent coordinate arrives as NaN from the Parquet column.
+            // The whole ticker-day is dropped rather than imputed: a fitted
+            // cloud with an invented point in it is worse than a smaller one,
+            // and the count says how much smaller.
+            if (!std::isfinite(v)) {
+                complete = false;
+                break;
+            }
+            fp.coords.push_back(v);
+        }
+        if (!complete) {
+            ++dropped_incomplete;
+            continue;
+        }
+        by_ticker[(*ticker_col)[i]].push_back(std::move(fp));
+    }
+    for (auto& [ticker, history] : by_ticker) {
+        std::sort(history.begin(), history.end(),
+                  [](const FramePoint& a, const FramePoint& b) { return a.date < b.date; });
+    }
+
+    // Same causal rule as View B: the trailing window of this name's own
+    // prior valuation history, never including today's own point.
+    std::int64_t points_scored = 0;
+    std::int64_t tickers_too_short = 0;
+    // |correlation| between the first two axes, per window. Collected
+    // because the axes are not as independent as having two of them
+    // suggests: E/P and FCF/P share a denominator, so between filings they
+    // are exactly proportional. How close to collinear that leaves a real
+    // window is a measurement, and it decides how much a second axis is
+    // actually buying.
+    std::vector<double> axis_correlations;
+    for (const auto& [ticker, history] : by_ticker) {
+        if (static_cast<std::int64_t>(history.size()) <= lookback) {
+            ++tickers_too_short;
+            continue;
+        }
+        for (std::size_t i = static_cast<std::size_t>(lookback); i < history.size(); ++i) {
+            std::vector<FramePoint> window(
+                history.begin() + static_cast<std::ptrdiff_t>(i - static_cast<std::size_t>(lookback)),
+                history.begin() + static_cast<std::ptrdiff_t>(i));
+            Eigen::MatrixXd training = points_to_matrix(window);
+            Eigen::VectorXd query = point_to_vector(history[i]);
+
+            if (training.cols() >= 2 && training.rows() > 2) {
+                const Eigen::VectorXd a = training.col(0);
+                const Eigen::VectorXd b = training.col(1);
+                const Eigen::VectorXd ca = a.array() - a.mean();
+                const Eigen::VectorXd cb = b.array() - b.mean();
+                const double denom = ca.norm() * cb.norm();
+                if (denom > 0.0) axis_correlations.push_back(std::abs(ca.dot(cb) / denom));
+            }
+
+            const std::size_t before = rows.dates.size();
+            score_both_estimators(rows, training, query, history[i].date, ticker, "D", alpha);
+            if (rows.dates.size() > before) ++points_scored;
+        }
+    }
+
+    manifest.set_string("view_d", "enabled");
+    std::string axis_list;
+    for (const std::string& axis : *axes) {
+        if (!axis_list.empty()) axis_list += ",";
+        axis_list += axis;
+    }
+    manifest.set_string("view_d_axes", axis_list);
+    manifest.set_int("view_d_dims", static_cast<std::int64_t>(axes->size()));
+    manifest.set_int("view_d_points_scored", points_scored);
+    manifest.set_int("view_d_tickers", static_cast<std::int64_t>(by_ticker.size()));
+    // How much the axis choice costs. Reported rather than left implicit,
+    // because adding an axis shrinks this cross-section and the shrinkage is
+    // the whole trade-off.
+    manifest.set_int("view_d_ticker_days_dropped_incomplete", dropped_incomplete);
+    manifest.set_int("view_d_tickers_history_too_short", tickers_too_short);
+
+    if (!axis_correlations.empty()) {
+        std::sort(axis_correlations.begin(), axis_correlations.end());
+        const auto at = [&](double q) {
+            const auto idx = static_cast<std::size_t>(q * static_cast<double>(
+                                                           axis_correlations.size() - 1));
+            return axis_correlations[idx];
+        };
+        // A median close to 1.0 means the two axes are, most of the time,
+        // one axis - so View D is effectively one-dimensional however many
+        // columns it was fitted with, and the estimator failures below are
+        // the honest consequence rather than a numerical accident.
+        manifest.set_double("view_d_axis_abs_correlation_median", at(0.5));
+        manifest.set_double("view_d_axis_abs_correlation_p10", at(0.10));
+        manifest.set_double("view_d_axis_abs_correlation_p90", at(0.90));
+        std::int64_t above_099 = 0;
+        for (double c : axis_correlations) {
+            if (c > 0.99) ++above_099;
+        }
+        manifest.set_int("view_d_windows_abs_correlation_above_0_99", above_099);
+        manifest.set_int("view_d_windows_measured",
+                          static_cast<std::int64_t>(axis_correlations.size()));
+    }
+    return {};
+}
+
 gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem::path& output_dir,
                                   gm::Manifest& manifest) {
     double alpha = config.get_double_or("boundaries.alpha", 0.05);
@@ -398,6 +597,13 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
                                                "boundaries.view_b_mesh_stride must be at least 1",
                                                std::to_string(view_b_mesh_stride)));
     }
+    // Validated here rather than where it is used, for the same reason the
+    // View B ticker list is: score_view_d runs after View A and View B have
+    // scored every point, so a typo in an axis name would otherwise fail the
+    // run twenty minutes in, having already done all the work it is about to
+    // throw away.
+    if (auto axes = read_view_d_axes(config); !axes) return tl::unexpected(axes.error());
+
     if (!write_meshes && !view_b_mesh_tickers->empty()) {
         // Naming tickers to mesh and leaving the master switch off is a
         // config that asks for surfaces and silently gets none. Say so
@@ -515,6 +721,14 @@ gm::VoidResult run_gm_boundaries(const gm::Config& config, const std::filesystem
             }
             ++view_b_index;
         }
+    }
+
+    // View D: the same causal question in valuation space rather than
+    // embedding space (ADR-022). Scored into the same table under view "D",
+    // because a consumer comparing "unusual in price geometry" against
+    // "unusual in valuation" wants one table, not two.
+    if (auto r = score_view_d(config, output_dir, rows, manifest, alpha, view_b_lookback); !r) {
+        return tl::unexpected(r.error());
     }
 
     // Read out before the vectors below are moved-from into the Table -

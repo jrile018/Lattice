@@ -31,15 +31,19 @@
 
 #include <gm-core/calendar.hpp>
 #include <gm-core/stage_main.hpp>
+#include <gm-data/fundamentals.hpp>
 #include <gm-data/liquidity.hpp>
 #include <gm-io/http_cache.hpp>
 #include <gm-io/parquet.hpp>
 #include <gm-io/table.hpp>
 
+#include <spdlog/spdlog.h>
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <set>
 
 namespace {
@@ -226,6 +230,183 @@ gm::Result<TickerBars> fetch_and_screen(gm::io::HttpCache& cache, const gm::Nyse
     return bars;
 }
 
+/// Fetches, assembles and writes fundamentals.parquet for every ticker in
+/// `tickers` that the universe table carries a CIK for.
+///
+/// One issuer failing does not stop the stage. A company can be missing from
+/// SEC's XBRL API for dull reasons (a foreign private issuer filing 20-F, a
+/// recent listing, a CIK that has changed) and for interesting ones, and a
+/// price panel is still worth having without its fundamentals. What is NOT
+/// acceptable is failing quietly: the per-issuer outcome, the tag that won
+/// for each concept, and every zero substituted for an absent optional all
+/// reach the manifest.
+gm::VoidResult ingest_fundamentals(const gm::io::Table& universe_table,
+                                    const std::vector<std::string>& tickers,
+                                    gm::io::HttpCache& cache,
+                                    const std::filesystem::path& output_dir,
+                                    gm::Manifest& manifest) {
+    auto ticker_col = universe_table.string_column("ticker");
+    if (!ticker_col) return tl::unexpected(ticker_col.error());
+    auto cik_col = universe_table.int64_column("cik");
+    if (!cik_col) return tl::unexpected(cik_col.error());
+
+    // std::map, not unordered_map: iteration order is part of the artifact
+    // (ADR-003), and this decides the row order of fundamentals.parquet.
+    std::map<std::string, std::int64_t> cik_of;
+    for (std::size_t i = 0; i < ticker_col->size() && i < cik_col->size(); ++i) {
+        cik_of.emplace((*ticker_col)[i], (*cik_col)[i]);
+    }
+
+    std::vector<std::string> out_ticker, out_period_end, out_available_date;
+    std::vector<double> out_net_income, out_ebitda, out_fcf, out_debt, out_cash, out_shares;
+
+    std::int64_t issuers_ok = 0, issuers_no_cik = 0, issuers_fetch_failed = 0,
+                 issuers_unassemblable = 0;
+    // concept_name -> how many issuers resolved it to each tag, and how many
+    // resolved it to nothing. This is the per-field coverage the README asks
+    // for, measured on the run rather than quoted from a probe.
+    std::map<std::string, std::map<std::string, std::int64_t>> tag_usage;
+    std::map<std::string, std::int64_t> concept_absent;
+    std::map<std::string, std::int64_t> zero_substitutions;
+    std::map<std::string, std::int64_t> zero_not_yet_published;
+    std::map<std::string, std::int64_t> stale_component;
+    std::vector<std::string> issuer_failures;
+
+    for (const std::string& ticker : tickers) {
+        const auto cik = cik_of.find(ticker);
+        if (cik == cik_of.end() || cik->second <= 0) {
+            ++issuers_no_cik;
+            continue;
+        }
+        auto body = gm::data::fetch_company_facts(cache, cik->second);
+        if (!body) {
+            ++issuers_fetch_failed;
+            issuer_failures.push_back(ticker + ": " + body.error().message);
+            continue;
+        }
+        nlohmann::json doc;
+        try {
+            doc = nlohmann::json::parse(*body);
+        } catch (const std::exception& e) {
+            ++issuers_fetch_failed;
+            issuer_failures.push_back(std::string{ticker} + ": unparseable companyfacts: " +
+                                       e.what());
+            continue;
+        }
+
+        auto built = gm::data::build_fundamentals(doc);
+        if (!built) {
+            // Almost always "no net-income TTM could be assembled" - a real
+            // condition for an issuer whose XBRL history is too short to
+            // anchor a twelve-month window, not a bug.
+            ++issuers_unassemblable;
+            issuer_failures.push_back(ticker + ": " + built.error().message);
+            continue;
+        }
+
+        ++issuers_ok;
+        for (const auto& [concept_name, tag] : built->tag_used) {
+            if (tag.empty()) {
+                ++concept_absent[concept_name];
+            } else {
+                ++tag_usage[concept_name][tag];
+            }
+        }
+        for (const auto& [concept_name, count] : built->substituted_zero) {
+            zero_substitutions[concept_name] += count;
+        }
+        for (const auto& [concept_name, count] : built->substituted_zero_not_yet_published) {
+            zero_not_yet_published[concept_name] += count;
+        }
+        for (const auto& [field, count] : built->stale_component) stale_component[field] += count;
+        for (const auto& row : built->rows) {
+            out_ticker.push_back(ticker);
+            out_period_end.push_back(row.period_end);
+            out_available_date.push_back(row.available_date);
+            out_net_income.push_back(row.net_income_ttm);
+            out_ebitda.push_back(row.ebitda_ttm);
+            out_fcf.push_back(row.free_cash_flow_ttm);
+            out_debt.push_back(row.total_debt);
+            out_cash.push_back(row.cash_and_equivalents);
+            out_shares.push_back(row.shares_outstanding);
+        }
+    }
+
+    const std::size_t rows = out_ticker.size();
+    gm::io::Table table;
+    if (auto r = table.add_string_column("ticker", std::move(out_ticker)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_string_column("period_end", std::move(out_period_end)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_string_column("available_date", std::move(out_available_date)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("net_income_ttm", std::move(out_net_income)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("ebitda_ttm", std::move(out_ebitda)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("free_cash_flow_ttm", std::move(out_fcf)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("total_debt", std::move(out_debt)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("cash_and_equivalents", std::move(out_cash)); !r) return tl::unexpected(r.error());
+    if (auto r = table.add_double_column("shares_outstanding", std::move(out_shares)); !r) return tl::unexpected(r.error());
+
+    auto write = gm::io::write_parquet(table, output_dir / "fundamentals.parquet");
+    if (!write) return tl::unexpected(write.error());
+
+    manifest.set_string("fundamentals", "enabled");
+    // "reported", never "estimated": every available_date here is an actual
+    // EDGAR submission date carried in the source, not a lag assumption
+    // added by this pipeline. See gm-data/fundamentals.hpp.
+    manifest.set_string("fundamentals_availability", "reported");
+    manifest.set_int("fundamentals_rows", static_cast<std::int64_t>(rows));
+    manifest.set_int("fundamentals_issuers_ok", issuers_ok);
+    manifest.set_int("fundamentals_issuers_no_cik", issuers_no_cik);
+    manifest.set_int("fundamentals_issuers_fetch_failed", issuers_fetch_failed);
+    manifest.set_int("fundamentals_issuers_unassemblable", issuers_unassemblable);
+
+    nlohmann::json coverage = nlohmann::json::object();
+    for (const auto& [concept_name, tags] : tag_usage) {
+        nlohmann::json entry = nlohmann::json::object();
+        std::int64_t resolved = 0;
+        for (const auto& [tag, count] : tags) {
+            entry[tag] = count;
+            resolved += count;
+        }
+        entry["_resolved_issuers"] = resolved;
+        entry["_absent_issuers"] = concept_absent.count(concept_name) ? concept_absent.at(concept_name) : 0;
+        coverage[concept_name] = entry;
+    }
+    for (const auto& [concept_name, count] : concept_absent) {
+        if (!coverage.contains(concept_name)) {
+            coverage[concept_name] = {{"_resolved_issuers", 0}, {"_absent_issuers", count}};
+        }
+    }
+    manifest.set_json("fundamentals_tag_coverage", coverage);
+
+    // Two different situations, reported apart: the issuer reports this
+    // concept nowhere (a permanent property of the filer, where zero is
+    // simply correct) versus it does report it but not by that row's
+    // available_date (early history, which fills in).
+    nlohmann::json zeros = nlohmann::json::object();
+    for (const auto& [concept_name, count] : zero_substitutions) zeros[concept_name] = count;
+    manifest.set_json("fundamentals_zero_filer_reports_none", zeros);
+    nlohmann::json not_yet = nlohmann::json::object();
+    for (const auto& [concept_name, count] : zero_not_yet_published) not_yet[concept_name] = count;
+    manifest.set_json("fundamentals_zero_not_yet_published", not_yet);
+    // Rows whose EBITDA or free cash flow came from a figure describing an
+    // earlier period than the row itself - the most recent one that was
+    // public at the time. Not an error; visible so it is not a surprise.
+    nlohmann::json stale = nlohmann::json::object();
+    for (const auto& [field, count] : stale_component) stale[field] = count;
+    manifest.set_json("fundamentals_stale_component_rows", stale);
+
+    if (!issuer_failures.empty()) {
+        nlohmann::json failures = nlohmann::json::array();
+        for (const auto& f : issuer_failures) failures.push_back(f);
+        manifest.set_json("fundamentals_issuer_failures", failures);
+    }
+
+    spdlog::info(
+        "gm-ingest: fundamentals {} rows from {} issuers ({} no CIK, {} fetch failed, {} could "
+        "not be assembled)",
+        rows, issuers_ok, issuers_no_cik, issuers_fetch_failed, issuers_unassemblable);
+    return {};
+}
+
 gm::VoidResult run_gm_ingest(const gm::Config& config, const std::filesystem::path& output_dir,
                               gm::Manifest& manifest) {
     std::filesystem::path universe_parquet =
@@ -321,6 +502,10 @@ gm::VoidResult run_gm_ingest(const gm::Config& config, const std::filesystem::pa
     // Optional: a config that only wants the raw validated panel (e.g.
     // this milestone's 10-ticker golden fixture, which has too few
     // names for "top 100" to mean anything) simply omits these keys.
+    // Defaults to the full fetched set, and is narrowed to the liquid
+    // universe below when one is computed.
+    std::vector<std::string> fundamentals_tickers = tickers;
+
     if (config.has("ingest.liquidity_window_days") || config.has("ingest.liquidity_top_n")) {
         std::int64_t window_days = config.get_int_or("ingest.liquidity_window_days", 60);
         std::int64_t top_n = config.get_int_or("ingest.liquidity_top_n", 100);
@@ -348,6 +533,35 @@ gm::VoidResult run_gm_ingest(const gm::Config& config, const std::filesystem::pa
         manifest.set_int("liquid_universe_size", static_cast<std::int64_t>(ranked->size()));
         manifest.set_int("liquidity_window_days", window_days);
         manifest.set_int("liquidity_top_n", top_n);
+
+        // Everything downstream reads the liquid universe, so that is the
+        // set worth fetching filings for.
+        fundamentals_tickers.clear();
+        for (const auto& r : *ranked) fundamentals_tickers.push_back(r.ticker);
+    }
+
+    // ---- fundamentals (ADR-022, ADR 7.3) --------------------------------
+    // Opt-in: one SEC request per issuer, each document 10-40 MB, and a run
+    // that only wants the price panel should not pay for it. Absent the key,
+    // nothing here runs and no fundamentals.parquet is written - which
+    // downstream stages treat as "no valuation coordinates", not an error.
+    //
+    // Deliberately placed AFTER the liquidity ranking so it can fetch the ~81
+    // names that survive it rather than the ~503-name candidate pool. The
+    // pool's other 420 issuers are never read by any later stage, and SEC's
+    // bandwidth is a shared resource with a published fair-use policy, not
+    // just a local cost.
+    if (config.get_bool_or("ingest.fetch_fundamentals", false)) {
+        const std::int64_t max_issuers = config.get_int_or("ingest.fundamentals_max_issuers", -1);
+        if (max_issuers >= 0 &&
+            static_cast<std::int64_t>(fundamentals_tickers.size()) > max_issuers) {
+            fundamentals_tickers.resize(static_cast<std::size_t>(max_issuers));
+        }
+        auto fundamentals_result = ingest_fundamentals(*universe_table, fundamentals_tickers,
+                                                        cache, output_dir, manifest);
+        if (!fundamentals_result) return tl::unexpected(fundamentals_result.error());
+    } else {
+        manifest.set_string("fundamentals", "disabled (ingest.fetch_fundamentals = false)");
     }
 
     manifest.set_int("rows_written", static_cast<std::int64_t>(combined.num_rows()));

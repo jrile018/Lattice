@@ -110,26 +110,56 @@ struct FundamentalsRow {
                                                       std::string_view ticker,
                                                       std::string_view as_of);
 
-/// Why a ticker-day has no valuation coordinate, or that it has one.
+/// Why a ticker-day has no valuation coordinates AT ALL. Conditions that
+/// affect one coordinate but not the others are not in here - see
+/// ValuationYields.
 enum class ValuationStatus {
-    kOk = 0,
-    kNoFundamentalsAvailable,     ///< nothing published as of that day yet
-    kNonFiniteInput,              ///< a required field is absent in the source
-    kNonPositiveMarketCap,        ///< close price or share count non-positive
-    kNonPositiveEnterpriseValue,  ///< EV <= 0; see the header comment
+    kOk = 0,                   ///< at least one coordinate was computed
+    kNoFundamentalsAvailable,  ///< nothing published as of that day yet
+    kNonPositiveMarketCap,     ///< close price or share count non-positive
+    kNoYieldComputable,        ///< market cap fine, every coordinate's inputs absent
 };
 
+/// The three coordinates, each independently present or absent.
+///
+/// Absent is per-COORDINATE and not per-row, which matters more than it
+/// looks. Measured across 40 real S&P issuers' SEC filings, E/P is
+/// derivable for 40, FCF/P for 39, and EBITDA/EV for only 29. The eleven
+/// misses are mostly structural rather than data gaps: a bank does not
+/// report an operating-income subtotal, because that is not how a bank's
+/// income statement is built, and EBITDA is close to meaningless for one
+/// anyway. Rejecting those rows outright - which an all-or-nothing rule
+/// does - would discard two perfectly good coordinates for the sake of a
+/// third that is undefined for that issuer, for 28% of the sample.
 struct ValuationYields {
-    double earnings_yield{};   ///< E/P
-    double ebitda_ev_yield{};  ///< EBITDA/EV
-    double fcf_yield{};        ///< FCF/P
+    std::optional<double> earnings_yield;   ///< E/P
+    std::optional<double> ebitda_ev_yield;  ///< EBITDA/EV
+    std::optional<double> fcf_yield;        ///< FCF/P
+
+    [[nodiscard]] bool any() const noexcept {
+        return earnings_yield.has_value() || ebitda_ev_yield.has_value() ||
+               fcf_yield.has_value();
+    }
+};
+
+/// Why one coordinate is absent. Counted per coordinate so coverage is a
+/// published number per axis rather than one blended figure that hides
+/// which axis is the weak one.
+enum class YieldStatus {
+    kOk = 0,
+    kMissingInput,             ///< a field this coordinate needs is absent in the source
+    kNonPositiveDenominator,   ///< EBITDA/EV only: EV <= 0; see the header comment
 };
 
 struct ValuationPoint {
     ValuationStatus status{ValuationStatus::kOk};
-    /// Meaningful only when `status == kOk`. Left value-initialised otherwise;
-    /// callers must branch on `status` rather than inspect these.
+    /// Each coordinate is meaningful iff it has a value. Present only when
+    /// `status == kOk`; a row-level failure leaves all three absent.
     ValuationYields yields{};
+    /// Per-coordinate outcome, in the fixed order E/P, EBITDA/EV, FCF/P.
+    YieldStatus earnings_status{YieldStatus::kOk};
+    YieldStatus ebitda_ev_status{YieldStatus::kOk};
+    YieldStatus fcf_status{YieldStatus::kOk};
 };
 
 /// The three coordinates for one ticker on one day.
@@ -146,6 +176,13 @@ struct ValuationPanel {
     /// for the stage manifest, so coverage is a published number rather than
     /// something a reader has to infer from missing rows.
     std::map<ValuationStatus, std::int64_t> status_counts;
+    /// Per-coordinate outcome counts, keyed "earnings_yield",
+    /// "ebitda_ev_yield", "fcf_yield". Counted only for ticker-days that got
+    /// as far as having a market cap, so these are about the coordinate and
+    /// not about the row. Reported separately from status_counts because one
+    /// blended coverage figure would hide which axis is the weak one - and
+    /// measured on real filings, one of the three clearly is.
+    std::map<std::string, std::map<YieldStatus, std::int64_t>> yield_counts;
 };
 
 /// Applies the as-of rule and the yield computation across a whole price
@@ -158,5 +195,6 @@ struct ValuationPanel {
 
 /// Stable snake_case name for a status, for manifest keys and log lines.
 [[nodiscard]] std::string_view to_string(ValuationStatus status);
+[[nodiscard]] std::string_view to_string(YieldStatus status);
 
 } // namespace gm::features
