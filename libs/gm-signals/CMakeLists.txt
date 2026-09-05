@@ -29,6 +29,17 @@ target_link_libraries(gm-signals-lib
     $<IF:$<TARGET_EXISTS:osqp::osqp>,osqp::osqp,osqp::osqpstatic>
 )
 
+# When the SHARED osqp is the one being linked, its headers only decorate
+# the API with __declspec(dllimport) if OSQP_SHARED_LIB is defined - see
+# osqp_export_define.h. Without it MSVC emits calls to undecorated names
+# while the import library exports __imp_-prefixed ones, and the link
+# fails with four unresolved externals that look like a missing library
+# rather than a missing macro. Conditioned on exactly the same target test
+# as the link above, so the two can never disagree.
+target_compile_definitions(gm-signals-lib PRIVATE
+  $<$<TARGET_EXISTS:osqp::osqp>:OSQP_SHARED_LIB>
+)
+
 target_compile_features(gm-signals-lib PUBLIC cxx_std_20)
 
 if (GM_BUILD_TESTS)
