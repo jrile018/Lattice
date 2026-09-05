@@ -3,6 +3,7 @@ add_executable(gm-data-tests
   liquidity_test.cpp
   fundamentals_test.cpp
   fundamentals_concepts_test.cpp
+  revisions_test.cpp
 )
 
 target_link_libraries(gm-data-tests

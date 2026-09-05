@@ -23,15 +23,21 @@
 //     outright (illiquid names and real halts do have zero-volume days)
 //   - gaps of more than 3 trading days between consecutive bars
 //     (checked against the NYSE calendar) are counted and reported
-// NOT yet implemented (tracked, not hidden): the two-source
-// cross-validation against Tiingo, and retroactive-change detection by
-// diffing against a prior cached fetch - both need a second wired-in
-// source or a prior run's cache respectively, neither of which exists
-// yet this milestone.
+//   - retroactive changes: when ingest.compare_against_run names an
+//     earlier run, every (ticker, date) present in both panels is
+//     compared and any bar whose price moved is counted and reported.
+//     Vendors revise history - a late split, a corrected tick, a restated
+//     dividend - and when they do, a backtest silently produces a
+//     different answer from the one it produced last week with no way to
+//     tell whether the strategy changed or the past did.
+// NOT yet implemented (tracked, not hidden): two-source cross-validation
+// against Tiingo, which needs a second wired-in source and an API key
+// this project does not have.
 
 #include <gm-core/calendar.hpp>
 #include <gm-core/stage_main.hpp>
 #include <gm-data/fundamentals.hpp>
+#include <gm-data/revisions.hpp>
 #include <gm-data/liquidity.hpp>
 #include <gm-io/http_cache.hpp>
 #include <gm-io/parquet.hpp>
@@ -45,6 +51,7 @@
 #include <chrono>
 #include <map>
 #include <set>
+#include <utility>
 
 namespace {
 
@@ -538,6 +545,53 @@ gm::VoidResult run_gm_ingest(const gm::Config& config, const std::filesystem::pa
         // set worth fetching filings for.
         fundamentals_tickers.clear();
         for (const auto& r : *ranked) fundamentals_tickers.push_back(r.ticker);
+    }
+
+    // ---- retroactive-change screen (ADR-015) ----------------------------
+    const std::string compare_run = config.get_string_or("ingest.compare_against_run", "");
+    if (!compare_run.empty()) {
+        const auto prior_prices =
+            output_dir.parent_path().parent_path() / compare_run / "gm-ingest" / "prices.parquet";
+        if (!std::filesystem::exists(prior_prices)) {
+            return tl::unexpected(gm::Error::make(
+                gm::ErrorCode::kNotFound,
+                "ingest.compare_against_run names a run with no prices.parquet",
+                prior_prices.string()));
+        }
+        auto prior = gm::io::read_parquet(prior_prices);
+        if (!prior) return tl::unexpected(prior.error());
+        // Adjusted close: the column every downstream return is computed
+        // from, so a revision to it is a revision to everything.
+        auto report = gm::data::compare_price_panels(*prior, combined, "adjclose");
+        if (!report) return tl::unexpected(report.error());
+
+        manifest.set_string("retroactive_change_check", "enabled");
+        manifest.set_string("compared_against_run", compare_run);
+        manifest.set_int("bars_compared_against_prior_run", report->compared);
+        manifest.set_int("bars_revised_since_prior_run", report->revised);
+        manifest.set_int("tickers_with_revised_bars",
+                          static_cast<std::int64_t>(report->revised_tickers.size()));
+        // New and removed bars are normal - the panel extends daily and
+        // the universe turns over - and are reported apart from revisions
+        // so a reader never mistakes one for the other.
+        manifest.set_int("bars_new_since_prior_run", report->added);
+        manifest.set_int("bars_absent_since_prior_run", report->removed);
+        if (!report->first_example.empty()) {
+            manifest.set_string("first_revised_bar", report->first_example);
+        }
+        if (report->revised > 0) {
+            spdlog::warn(
+                "gm-ingest: {} historical bars across {} tickers CHANGED since run {}. Results "
+                "built on that run are not reproducible from this one. First: {}",
+                report->revised, report->revised_tickers.size(), compare_run,
+                report->first_example);
+        } else {
+            spdlog::info("gm-ingest: {} bars compared against run {}, none revised",
+                          report->compared, compare_run);
+        }
+    } else {
+        manifest.set_string("retroactive_change_check",
+                             "disabled (ingest.compare_against_run not set)");
     }
 
     // ---- fundamentals (ADR-022, ADR 7.3) --------------------------------

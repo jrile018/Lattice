@@ -2,6 +2,7 @@ add_library(gm-data STATIC
   src/universe.cpp
   src/liquidity.cpp
   src/fundamentals.cpp
+  src/revisions.cpp
 )
 add_library(gm::data ALIAS gm-data)
 
