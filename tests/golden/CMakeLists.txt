@@ -10,6 +10,7 @@ configure_file(
 
 add_executable(gm-golden-tests
   m0_pipeline_test.cpp
+  causality_test.cpp
 )
 
 target_link_libraries(gm-golden-tests
@@ -30,6 +31,11 @@ add_dependencies(gm-golden-tests
 target_compile_definitions(gm-golden-tests PRIVATE
   GM_RUN_EXECUTABLE="$<TARGET_FILE:gm-run>"
   GM_GOLDEN_FIXTURE_CONFIG="${CMAKE_CURRENT_BINARY_DIR}/golden_run.toml"
+  # causality_test.cpp drives one stage directly rather than the whole
+  # chain: the property it checks (ADR-020 layer 3) is a property of
+  # gm-boundaries' windowing, and running the other eight stages to reach
+  # it would only add ways for the test to fail for unrelated reasons.
+  GM_BOUNDARIES_EXECUTABLE="$<TARGET_FILE:gm-boundaries>"
 )
 
 catch_discover_tests(gm-golden-tests)
