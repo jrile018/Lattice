@@ -48,6 +48,10 @@
 #pragma warning(disable : 4100)  // unreferenced formal parameter
 #pragma warning(disable : 4389)  // signed/unsigned mismatch in comparison
 #pragma warning(disable : 4018)  // signed/unsigned mismatch
+#pragma warning(disable : 4456)  // declaration hides previous local
+#pragma warning(disable : 4457)  // declaration hides function parameter
+#pragma warning(disable : 4458)  // declaration hides class member
+#pragma warning(disable : 4459)  // declaration hides global
 #endif
 
 #include <ripser/ripser.hpp>
