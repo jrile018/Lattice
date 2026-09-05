@@ -163,7 +163,7 @@ ADR-013's reversion gate passes is a question about findings, not about
 code, and answering it here by implication would be exactly the kind of
 quiet overclaim the rest of this repo is written to avoid.
 
-**Test suite: 343 tests, green in both `linux-gcc-release` and
+**Test suite: 347 tests, green in both `linux-gcc-release` and
 `linux-gcc-asan`.** Every milestone below closes only on that pair (ADR.md
 §13).
 
@@ -365,6 +365,34 @@ such rays, and when the cash-flow-to-earnings ratio is stable across them,
 the fan collapses toward a line. The run reports the measured correlation
 between the axes for exactly this reason: a second coordinate that is a
 near-copy of the first adds columns, not information.
+
+### The one property everything else rests on
+
+ADR-020 asks that View B scores be **causal**: recomputing with future data
+truncated must change nothing. That is the most load-bearing claim in this
+project and the one whose violation is hardest to notice — a look-ahead
+leak does not crash, does not fail a unit test, and does not produce
+implausible numbers. It produces *better* numbers, and a backtest built on
+one looks like a discovery.
+
+It now has three tests, run against the real stage binary:
+
+1. **Truncation.** The same panel scored to date D, and scored again with
+   fifty more days appended, must agree *exactly* on every date up to D.
+2. **Sensitivity.** Two runs differing only in lookback must *disagree* on
+   most shared dates — otherwise the first test is comparing two things
+   that would match regardless, and proves nothing.
+3. **Exclusion of today.** A ticker jumping five units out of a cloud
+   spanning 0.02 must score enormously outside its own boundary.
+
+The third exists because mutation testing showed the first cannot see that
+bug: extending the window by one day to include the scored point is not
+look-ahead relative to the end of the panel, so both runs agree and the
+property passes while the estimator is quietly ruined — the more unusual a
+day is, the better it hides. And the third test's *own first version* was
+also non-discriminating, which mutation testing caught as well: `depth` is
+a signed margin, so a ratio assertion is vacuous whenever the control is
+negative. Both are written up in the test file.
 
 ### How the tests here are meant to be read
 
