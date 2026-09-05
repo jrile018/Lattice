@@ -87,6 +87,7 @@ endif()
 
 if (GM_BUILD_BENCHMARKS)
   find_package(benchmark CONFIG QUIET)
+  add_subdirectory(tests/benchmarks)
 endif()
 
 # Vendored single-header libraries (ADR-005: pinned, licensed, not vcpkg).
