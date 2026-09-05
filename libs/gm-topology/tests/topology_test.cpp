@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <Eigen/Dense>
 #include <cmath>
+#include <numbers>
 
 TEST_CASE("TopologyH0: SingleLinkageDetectsConnectedComponents") {
     Eigen::MatrixXd points(3, 2);
@@ -58,7 +59,10 @@ TEST_CASE("TopologyH1: RingHasNonzeroH1") {
     Eigen::MatrixXd points(12, 2);
 
     for (int i = 0; i < 12; ++i) {
-        double angle = 2.0 * M_PI * i / 12.0;
+        // std::numbers::pi, not M_PI: M_PI is a POSIX extension, not
+        // standard C++, and MSVC does not define it without
+        // _USE_MATH_DEFINES. This project is C++20 and has the real one.
+        double angle = 2.0 * std::numbers::pi * i / 12.0;
         points(i, 0) = std::cos(angle);
         points(i, 1) = std::sin(angle);
     }
