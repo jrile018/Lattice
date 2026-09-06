@@ -7,6 +7,7 @@ add_library(gm-signals-lib STATIC
   src/ou_fit.cpp
   src/excursion.cpp
   src/earnings.cpp
+  src/survival.cpp
 )
 add_library(gm::signals ALIAS gm-signals-lib)
 

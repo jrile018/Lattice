@@ -1,4 +1,23 @@
-// gm-report: the ADR-013 reversion study - "the gate." Reads
+// gm-report: the ADR-013 reversion study - "the gate."
+//
+// ADR-013 asks for P(the point returns inside WITHIN H DAYS | exit
+// depth >= d). The first version of this stage dropped the horizon and
+// reported the fraction of excursions whose `reverted` flag was true -
+// a flag that means "closed before the price series ran out." Over
+// sixteen years a rolling-window z-score essentially always crosses
+// back eventually, so the study reported 99.8% in every bucket:
+// overall, in all four depth quartiles, with earnings and without. A
+// number that flat across every conditioning variable is a property of
+// the definition, not a fact about markets, and "it comes back
+// eventually" is neither tradable nor interesting.
+//
+// The horizon estimates below come from a Kaplan-Meier curve per
+// bucket (gm-signals/survival.hpp), which also handles the excursions
+// still outside the band when the data ended: those are censored, and
+// counting them as failures or dropping them biases the answer in
+// known opposite directions.
+//
+// Reads
 // gm-signals' excursions.parquet and spreads.parquet, tags each
 // excursion with whether an SEC 8-K filing fell inside its realized
 // span (fetched live via gm::signals::fetch_filing_dates, cached per
@@ -14,6 +33,7 @@
 #include <gm-io/parquet.hpp>
 #include <gm-io/table.hpp>
 #include <gm-signals/earnings.hpp>
+#include <gm-signals/survival.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -64,6 +84,10 @@ gm::VoidResult run_gm_report(const gm::Config& config, const std::filesystem::pa
     if (!exc_peak) return tl::unexpected(exc_peak.error());
     auto exc_reverted = excursions->bool_column("reverted");
     if (!exc_reverted) return tl::unexpected(exc_reverted.error());
+    // The horizon itself. Without it every question below collapses
+    // into "did it ever", which is the bug this stage was fixed for.
+    auto exc_duration = excursions->int64_column("duration_days");
+    if (!exc_duration) return tl::unexpected(exc_duration.error());
 
     // ticker -> CIK, first occurrence per ticker (CIK is constant per
     // ticker across universe.parquet's point-in-time membership rows).
@@ -145,6 +169,10 @@ gm::VoidResult run_gm_report(const gm::Config& config, const std::filesystem::pa
     std::map<std::string, RevertBucket> by_depth_quartile;
     std::map<std::string, RevertBucket> by_depth_quartile_no_earnings;
 
+    // Episodes per bucket for the survival curves. std::map so the
+    // buckets come out in the same order on every run (ADR-003).
+    std::map<std::string, std::vector<gm::signals::Episode>> episodes;
+
     for (std::size_t i = 0; i < exc_ticker->size(); ++i) {
         bool reverted = (*exc_reverted)[i];
         bool earn = had_earnings[i] != 0;
@@ -168,6 +196,49 @@ gm::VoidResult run_gm_report(const gm::Config& config, const std::filesystem::pa
             db2.count++;
             if (reverted) db2.reverted_count++;
         }
+
+        const gm::signals::Episode episode{(*exc_duration)[i], reverted};
+        episodes["overall"].push_back(episode);
+        episodes[label].push_back(episode);
+        episodes[earn ? "with_earnings_or_8k" : "without_earnings_or_8k"].push_back(episode);
+    }
+
+    // Horizons a position could actually be held for. Reported as a
+    // grid rather than one number because the shape is the finding:
+    // a bucket that reaches 60% by day 5 and one that reaches it by
+    // day 40 are different phenomena, and a single horizon chosen after
+    // looking at the data would be a free parameter nobody declared.
+    const std::vector<std::int64_t> horizons{5, 10, 20, 40, 60};
+
+    nlohmann::json by_horizon = nlohmann::json::object();
+    for (const auto& [bucket, eps] : episodes) {
+        auto curve = gm::signals::kaplan_meier(eps);
+        if (!curve) return tl::unexpected(curve.error());
+
+        nlohmann::json entry;
+        entry["episodes"] = curve->n();
+        entry["reverted"] = curve->events();
+        // Censored: still outside the band when the series ended. Named
+        // rather than folded into either outcome.
+        entry["censored"] = curve->censored();
+        entry["median_days_to_reversion"] =
+            curve->median_days() ? nlohmann::json(*curve->median_days()) : nlohmann::json(nullptr);
+
+        nlohmann::json points = nlohmann::json::array();
+        for (const auto h : horizons) {
+            const auto est = curve->at(h);
+            points.push_back({{"horizon_days", est.horizon_days},
+                              {"reverted_by", est.reverted_by},
+                              {"ci_low", est.ci_low},
+                              {"ci_high", est.ci_high},
+                              // How many episodes were still outside AND
+                              // still being watched once the horizon
+                              // passed. Zero means the estimate past
+                              // that point rests on nothing new.
+                              {"at_risk_at_horizon", est.at_risk_at_horizon}});
+        }
+        entry["horizons"] = points;
+        by_horizon[bucket] = entry;
     }
 
     // Half-life distribution summary across every scored spread (not
@@ -212,13 +283,27 @@ gm::VoidResult run_gm_report(const gm::Config& config, const std::filesystem::pa
 
     // reversion_study.json - the headline ADR-013 statistics.
     nlohmann::json study;
+    study["reverted_within_horizon"] = by_horizon;
+    study["horizon_note"] =
+        "P(reverted by H trading days) per bucket, Kaplan-Meier with Greenwood 95% intervals. "
+        "This is ADR-013's gate statistic. The `ever_reverted` figures below are the horizonless "
+        "measure this replaced: they read ~0.998 in every bucket because `reverted` means "
+        "'closed before the price series ended', which is very nearly tautological over sixteen "
+        "years. They are kept only so the two can be compared.";
+    study["control_group_note"] =
+        "A base rate is not yet an edge. These figures say how often a flagged excursion reverts "
+        "by H, not whether it reverts more often than a comparable unflagged one - that needs a "
+        "matched control (same date, similar size/sector/volatility, similar prior move) and is "
+        "NOT computed here. Also unmeasured: episodes for one ticker overlap, so the effective "
+        "sample is smaller than the episode count, and a z-score crossing back is not by itself "
+        "a price move that could have been captured.";
     study["overall"] = {{"count", overall.count}, {"reverted", overall.reverted_count},
-                         {"reversion_rate", overall.reversion_rate()}};
+                         {"ever_reverted_rate", overall.reversion_rate()}};
     study["with_earnings_or_8k"] = {{"count", with_earnings.count}, {"reverted", with_earnings.reverted_count},
-                                     {"reversion_rate", with_earnings.reversion_rate()}};
+                                     {"ever_reverted_rate", with_earnings.reversion_rate()}};
     study["without_earnings_or_8k"] = {{"count", without_earnings.count},
                                         {"reverted", without_earnings.reverted_count},
-                                        {"reversion_rate", without_earnings.reversion_rate()}};
+                                        {"ever_reverted_rate", without_earnings.reversion_rate()}};
     // The comparison ADR-013 actually asks for: does reversion look
     // materially different once earnings-driven excursions are
     // excluded? A gap here would mean the unconditional rate was

@@ -3,6 +3,7 @@ add_executable(gm-signals-tests
   ou_fit_test.cpp
   excursion_test.cpp
   earnings_test.cpp
+  survival_test.cpp
 )
 
 target_link_libraries(gm-signals-tests
