@@ -1,26 +1,30 @@
 # ADR: Geometric Market Manifold — Equity Relationship Geometry for Statistical Arbitrage (C++ Edition)
 
-- **Status:** Proposed (awaiting approval before implementation)
-- **Date:** 2026-08-29 (remodeled same day: full C++ implementation)
+- **Status:** Accepted and implemented through M7; amended in place as findings arrive (each amendment is dated)
+- **Date:** 2026-08-29 (remodeled same day: full C++ implementation); last amended 2026-09-06
 - **Owner:** johnp
-- **Scope:** ~100 most-liquid US large-cap equities, daily bars, 2010–present
+- **Scope:** US equities first — a point-in-time S&P 500 pool of ~900 names over 2010–present, of which the ~100 most liquid at any date are scored — built so that further universes (futures, FX, crypto, credit) plug into the same pipeline (ADR-023)
 - **Language:** C++20, single codebase from ingestion to visualization
+- **Read with:** [PRIOR-ART.md](PRIOR-ART.md) — what has been tried elsewhere and what the evidence supports
 
 ---
 
 ## 1. Purpose
 
-Build a system that represents a universe of equities as points in a geometric space derived from how they actually behave, wraps a surface around the region of **normal** behavior, and detects when an individual equity leaves that region.
+Build an **internal research instrument** for a small fund: a system that represents a universe of instruments as points in a geometric space derived from how they actually behave, wraps a surface around the region of **normal** behavior, and shows a researcher — on screen, scrubbed through sixteen years — when an individual name leaves that region, how far, and in the company of what.
 
-The system answers three questions:
+Its purpose is to find *candidate* dislocations and make them legible. It is not a trading strategy, and it is not judged by one. The output of the instrument is a researcher's attention pointed at the right place, together with everything the system knows about why that place is unusual.
 
-1. **Where is this equity right now, relative to everything else?** — its coordinates in relationship space.
+The system answers four questions:
+
+1. **Where is this name right now, relative to everything else?** — its coordinates in relationship space.
 2. **Is it behaving normally?** — is its point inside or outside the learned normality surface, and by how much.
-3. **Has the space itself changed?** — the surface is refit on a rolling window, so it deforms over time. A sudden deformation is a regime change, and is itself a signal.
+3. **Has the space itself changed?** — the surface is refit on a rolling window, so it deforms over time. A sudden deformation is a regime change, and is itself a finding.
+4. **Why is it there?** — what the company does, who it is economically wired to, what it is worth against its own history (ADR-022), and what happened the last times it sat where it sits now. This is co-equal with the first three, not a secondary goal: a point outside a surface with no explanation attached is a picture, not a finding.
 
-The trading thesis is mean reversion: an equity that exits its normal region without a fundamental cause tends to be pulled back inside. The excursion is the entry, the re-entry is the exit.
+**The hypothesis the instrument exists to test** is mean reversion: that a name which exits its normal region without a fundamental cause tends to be pulled back inside, and that the geometry identifies such exits better than a name's own price history would. That hypothesis is *tested*, not assumed — ADR-013 is the measurement, and its amendment records both what has been measured and what has not. A backtest exists (ADR-014) as one supporting check with its sample size attached; it is not the verdict.
 
-A secondary, non-trading goal is **comprehension**: the same interface lets you click any point and learn what the company does, who it is economically wired to, and why it sits where it sits.
+**Scope is designed to widen.** The first universe is US equities. The pipeline's stage boundaries, artifact contract and instrument identity (ADR-023) are chosen so that a second universe — futures, FX, crypto, credit — is a new `gm-universe` and `gm-ingest` adapter and a set of normalisation conventions, not a second pipeline. Whether such universes share one geometry or get one each is deliberately undecided (ADR-023, *Not decided here*).
 
 ---
 
@@ -46,7 +50,7 @@ These govern every decision below. They are the priorities of a production quant
 2. **Determinism.** Same inputs + same config + same binary ⇒ bit-identical outputs. No wall-clock, no unseeded RNG, no `-ffast-math`, no order-dependent parallel reductions in scored paths.
 3. **One-way data flow.** Stages communicate only through immutable, versioned artifacts on disk. No stage reaches backward; the viewer never computes.
 4. **The hot path is boring.** Exceptions and allocation are fine at setup; the per-frame loops are allocation-free, exception-free, and profiled.
-5. **Research artifacts are production artifacts.** The backtest engine and the (eventual) live engine consume the same feature and signal code. There is no "research version" of any formula.
+5. **One formula, one object file.** Every stage that consumes a number consumes it from the same compiled code that produced it in every other stage; the viewer draws what `gm-boundaries` wrote and computes nothing. There is no "research version" of any formula. (An earlier wording of this principle spoke of an "eventual live engine". None is planned; the principle is about the absence of a research-versus-production seam, not about trading.)
 6. **Everything is replayable.** A manifest pins config, git commit, compiler, flags, and input-data hashes for every run.
 
 ---
@@ -99,7 +103,7 @@ These govern every decision below. They are the priorities of a production quant
 **Decision.** C++20 (not 23 — MSVC/GCC parity on the remote box is cleaner at 20) for every component: ingestion, validation, feature computation, geometry, boundary fitting, signals, backtest, artifact export, and the interactive viewer. No Python anywhere in the build or runtime.
 
 **What this buys.**
-- **One codebase to production.** The formula that scored the backtest is the object file that would score live data. Research→production rewrite risk — the classic quant-shop failure mode — is eliminated by construction.
+- **One codebase, no seam.** The formula that scored a frame in the viewer is the object file that scored it in the backtest and in the reversion study. The research→production rewrite risk — the classic quant-shop failure mode — is eliminated by construction, and that holds whether or not anything is ever traded.
 - **Determinism** is achievable in a way interpreted stacks fight against: pinned toolchain, controlled floating-point, no dependency drift under the run.
 - **Throughput** where it matters: parameter sweeps (thousands of full-history replays), persistent homology across ~3,800 frames, and headroom to run the full S&P 500 without architectural change.
 - **A native viewer** with sub-millisecond frame scrubbing across 15 years of geometry.
@@ -175,7 +179,8 @@ gm-geometry   → geometry/, edges.parquet       (corr → distance → MDS → 
 gm-boundaries → surfaces/, scores.parquet      (ellipsoid + kernel fits, all views)
 gm-signals    → spreads.parquet, excursions.parquet, signals.parquet
 gm-backtest   → backtest/                      (walk-forward, costs, DSR)
-gm-report     → report.html                    (static self-contained diagnostics)
+gm-report     → reversion_study.json,           (the ADR-013 gate statistics;
+                 excursions_tagged.parquet        no HTML — see ADR-007 amendment)
 gm-sweep      → orchestrates cells of the above across a parameter grid
 gm-view       → interactive viewer (read-only, ADR-018)
 ```
@@ -197,6 +202,8 @@ Each stage: reads one TOML config + upstream artifacts, validates schema version
 **Consequences.** Every run is accompanied by a human-readable artifact that can be archived or shared. The plotting module is deliberately minimal: publication charts are not the goal, decision-grade diagnostics are.
 
 **Rejected.** Generating Plotly/vega HTML (embeds a JS stack — against the spirit of the directive and adds an untested rendering dependency).
+
+**Amended (2026-09-06) — this ADR describes something that was never built.** There is no `gm-plot` library in the tree and `gm-report` has never emitted HTML. What it emits is `reversion_study.json` (the ADR-013 statistics, now with the horizon grid) and `excursions_tagged.parquet`; the eigenvalue spectra, alignment residuals and backtest tearsheet this ADR lists live in stage manifests and `backtest_results.json`, readable but not rendered. The viewer (ADR-018) became the human-readable record instead, which is a reasonable outcome for a research instrument — but it means a run's diagnostics are not archivable as a single file, and the decision above still reads as if they were. **Status: open.** Either build the HTML report as specified, or retire this ADR and say the viewer is the record. Not silently the latter.
 
 ---
 
@@ -620,7 +627,7 @@ This is the second live-fetch-contradicts-the-plan finding in the same M1 sessio
  FREE SOURCES              STAGED C++ PIPELINE (each box = one executable)         VIEWER
  ------------              --------------------------------------------           ------
 
- Stooq, Tiingo ─┐   ┌────────────┐  ┌────────────┐  ┌────────────┐
+ Yahoo chart   ─┐   ┌────────────┐  ┌────────────┐  ┌────────────┐
  SEC EDGAR      ├──►│ gm-universe│─►│ gm-ingest  │─►│ gm-features│─┐
  FRED, FINRA    │   └────────────┘  └────────────┘  └────────────┘ │
  ETF holdings  ─┘         artifacts (Parquet + manifests) flow →   ▼
@@ -635,7 +642,7 @@ This is the second live-fetch-contradicts-the-plan finding in the same M1 sessio
                                                   │ read-only         │
                                             ┌─────▼─────┐       ┌─────▼─────┐
                                             │  gm-view  │       │ gm-report │
-                                            │ ImGui/GL  │       │ HTML+SVG  │
+                                            │ ImGui/GL  │       │ JSON+pqt  │
                                             └───────────┘       └───────────┘
 ```
 
@@ -644,33 +651,46 @@ This is the second live-fetch-contradicts-the-plan finding in the same M1 sessio
 ```
 equities/
   ADR.md                          <- this document
+  PRIOR-ART.md                    <- what the evidence says; not decisions
   README.md
   CMakeLists.txt  CMakePresets.json  vcpkg.json
+  .github/workflows/ci.yml        three configurations + benchmark gate
   config/
-    universe.toml  params.toml  sweeps/*.toml
+    params.toml
   data/
-    raw/          immutable timestamped source pulls
-    reference/    CIK map, index change history, NYSE calendar table
-  libs/
+    raw/          immutable timestamped source pulls (gitignored)
+    reference/    sp500_constituents.csv (current snapshot),
+                  sp500_membership.csv (point-in-time, ADR-016)
+  libs/                           each with its own tests/ (ADR-020 layer 1)
     gm-core/      strong types, calendar, errors, config, manifest
     gm-io/        parquet read/write, mesh format, csv, http+cache
-    gm-data/      loaders, validation (ADR-015), universe logic
-    gm-features/  returns, betas, momentum, standardization
+    gm-data/      universe, membership history, fundamentals reader,
+                  liquidity, retroactive-change screen (ADR-015)
     gm-geometry/  shrinkage, RMT, distance, MDS, procrustes, MST
-    gm-boundaries/ mahalanobis, fastmcd, kde, marching cubes
-    gm-topology/  ripser wrapper, persistence features   (phase 3)
-    gm-signals/   baskets (OSQP), OU, entry/exit rules
+    gm-boundaries/ mahalanobis, fastmcd, kde, marching tetrahedra
+    gm-topology/  ripser wrapper, persistence features
+    gm-signals/   baskets (OSQP), OU, excursions, earnings, survival
     gm-backtest/  walk-forward, costs, DSR
-    gm-plot/      minimal SVG charting for gm-report
-  apps/
+    gm-profiles/  SEC company profiles for the learn panel
+    gm-sweep/     parameter-grid sharding and trial counting
+  apps/                           one executable per stage (ADR-006);
+                                  gm-features' market model and valuation
+                                  live here rather than in a lib
     gm-universe/ gm-ingest/ gm-features/ gm-geometry/ gm-boundaries/
-    gm-signals/ gm-backtest/ gm-report/ gm-sweep/ gm-run/ gm-view/
+    gm-signals/ gm-backtest/ gm-report/ gm-profiles/ gm-sweep/ gm-run/
+    gm-view/
   third_party/
     ripser/  tl-expected/            (vendored, pinned, licensed)
-  tests/        unit/  golden/  property/  fixtures/
-  benchmarks/
+  tests/
+    golden/       end-to-end against the built binaries: pipeline,
+                  causality, determinism
+    benchmarks/   frame-loop benchmarks + baseline.json
+  tools/          reproduction scripts for every measured table in
+                  these documents (membership, coverage, mesh shape)
   runs/<run_id>/                    immutable outputs (ADR-017)
 ```
+
+*(Corrected 2026-09-06 against the tree: there is no `gm-plot`, no `libs/gm-features`, no `config/universe.toml` or `sweeps/`; `gm-profiles` and `gm-sweep` exist and were unlisted.)*
 
 ### 8.2 Run artifact contract
 
@@ -678,7 +698,9 @@ equities/
 runs/2026-08-29__w60_k3_mds_rmt/
   manifest.json        config, git commit, compiler+flags, lib versions,
                        input hashes, trial count, timings
-  universe.parquet     date, ticker, in_universe, dollar_volume_rank
+  universe.parquet     date, ticker, security_name, gics_sector, cik,
+                       metadata_available  (false for a departed name the
+                       current constituent table no longer describes)
   prices.parquet       validated adjusted OHLCV panel
   features.parquet     the feature store  (§6.3)
   geometry.parquet     date, ticker, x, y, z, dim3..dim{k-1},
@@ -707,12 +729,26 @@ runs/2026-08-29__w60_k3_mds_rmt/
                        distance minus the critical distance, so negative
                        means inside. Which views a run scored is in the
                        manifest as views_scored.
-  excursions.parquet   ticker, start, end, peak_depth, reverted, had_earnings
-  spreads.parquet      date, ticker, z, half_life, basket weights
-  regime.parquet       date, structural_change, market_eigenvalue_share, vix
-  backtest/            trades.parquet, equity_curve.parquet, tearsheet.json
+  excursions.parquet   ticker, start_date, end_date, peak_depth,
+                       duration_days, reverted  (reverted=false means
+                       still outside when the series ended: censored)
+  excursions_tagged.parquet  the same rows plus had_earnings (gm-report)
+  reversion_study.json the ADR-013 gate: P(reverted by H) per bucket with
+                       Greenwood intervals and the risk set at each
+                       horizon; the horizonless ever_reverted figures kept
+                       beside them for comparison
+  spreads.parquet      date, ticker, z, half_life, tear_flag
+  baskets.parquet      date, ticker, peer, weight
+  regime.parquet       date, structural_change, h0_total_persistence,
+                       h1_total_persistence,
+                       wasserstein_distance_from_prev_frame, tear_flag
+                       (no VIX: FRED is not ingested — §7.5 is aspiration)
+  backtest_results.json  sharpe, DSR, n_trials, and one counter per veto
+                       (view A, view B, tear, earnings, half-life band,
+                       valuation gate ×3) — the vetoes are the useful
+                       part; the Sharpe is a supporting check
+  daily_returns.parquet  date, return  (the series the Sharpe is from)
   meta/profiles.json   per-ticker description, SIC, links (learn panel)
-  report.html          gm-report output
 ```
 
 ### 8.2.1 Accounting tag resolution, measured
@@ -878,8 +914,8 @@ Four tabs in increasing abstraction, plus a persistent learn panel:
 - **2D Pairs** — pick two names: return scatter, rolling correlation, spread with bands, excursion history. The legible baseline every exotic claim gets checked against.
 - **3D Sectors** — the cloud colored by sector with cluster hulls. Answers "did the geometry rediscover sectors?" — the cheapest possible detector of a broken pipeline.
 - **Manifold** — the centerpiece: point cloud inside the wireframe/solid normality surface; inside points dim, outside points lit and labeled with depth; toggles for MST edges, ellipsoid vs kernel surface, color-by (sector/depth/momentum/short interest), and trailing per-point paths.
-- **Evolution** — time made explicit: a play/scrub control across the full history over ImPlot strips of the structural change metric, market eigenvalue share, VIX, and a per-ticker inside/outside ribbon.
-- **Learn panel** (click any point, any tab): what the company does, SIC/sector, position and depth in all three views, current peer basket with weights, economic links, spread chart, excursion history with reversion outcomes. This is the "learn about the different equities" requirement — and the judgment-building tool for knowing when to distrust the signal.
+- **Evolution** — time made explicit: a play/scrub control across the full history over ImPlot strips of the structural change metric, persistence, tear flag, and a per-ticker inside/outside ribbon. (VIX is listed in the original design and is not drawn: FRED is not ingested.)
+- **Learn panel** (click any point, any tab): what the company does, SIC/sector, position and depth in all four views, current peer basket with weights, economic links, spread chart, excursion history with reversion outcomes. This is the "learn about the different equities" requirement — and the judgment-building tool for knowing when to distrust the signal.
 
 Performance contract: < 1 ms frame decode from the mapped run directory; 60 fps scrub across ~3,800 frames × 100 names.
 
@@ -889,10 +925,10 @@ Performance contract: < 1 ms frame decode from the mapped run directory; 60 fps 
 
 1. **Geometry sanity** — clusters correspond to real sectors; the object visibly clenches in March 2020. If not, stop and debug.
 2. **Alignment quality** — stable animation; structural change metric spikes at known events (Aug 2015, Feb 2018, Mar 2020, Jan 2021, Sep 2022).
-3. **Reversion study — the gate (ADR-013)** — out-of-sample `P(revert within H | depth ≥ d)`, split by earnings/8-K. **No lift over base rate ⇒ the project ships as a visualization tool.**
+3. **Reversion study — the gate (ADR-013)** — out-of-sample `P(revert within H | depth ≥ d)`, split by earnings/8-K, **against a matched control**. The question the gate answers is whether the geometry's flag carries information a researcher should act on — not whether to trade. Three outcomes, all acceptable and all to be stated plainly: the flag beats the control (the geometry adds information); it matches the control (the instrument is a legible view of ordinary mean reversion, which is still useful and must be described that way); it does worse (the boundary definition is wrong). *As of 2026-09-06 the base rate is measured and the control is not; see ADR-013's amendment for what that leaves open.*
 4. **Walk-forward backtest** — expanding fits, out-of-sample trades only, realistic costs (spread, commission, borrow, impact at traded size).
 5. **Deflated Sharpe** with machine-counted trials (ADR-014).
-6. **Robustness** — results must survive W, k, and estimator perturbations. A result that only works at W=60, k=8 is an artifact.
+6. **Robustness** — results must survive W, k, and estimator perturbations. A result that only works at W=60, k=8 is an artifact. *Added 2026-09-06:* a result must also survive a change in the definition of "reverted" — a measurement that reads the same under every conditioning variable (as the horizonless reversion rate did, 99.8% everywhere) is a definition, not a finding.
 7. **Engineering acceptance (C++-specific)** — full test suite green on MSVC and GCC; ASan/UBSan clean; golden pipeline byte-stable; benchmarks within budget; a run reproduces bit-identically from a clean clone + cached raw data.
 
 ---
@@ -901,17 +937,19 @@ Performance contract: < 1 ms frame decode from the mapped run directory; 60 fps 
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Anomaly is not an edge — excursions may not revert | **Highest** | ADR-013 is an explicit go/no-go gate before any trading work |
+| The flag carries no information beyond ordinary reversion | **Highest** | ADR-013, now with a horizon and a survival curve; the matched control is the open half. Until it exists, regression to the mean is an unexcluded explanation of every reversion figure in this document |
+| A measurement that cannot fail | High | Found once already: the gate reported 99.8% in every bucket for months because `reverted` had no horizon. Every headline statistic must be shown to *vary* under something before it is believed (§10 item 6) |
 | C++ dev velocity: data layer + viewer are real effort | High | Staged milestones (§13); math library is the easy part and lands early |
 | Correlation noise at q≈1.67 | High | ADR-009 mandatory shrinkage + RMT |
 | Embedding instability fakes "movement" | High | ADR-010 Procrustes; residual becomes a feature |
 | Hand-rolled numerics harbor silent bugs | High | ADR-020 reference vectors + goldens + properties + dual-platform CI |
-| Survivorship bias inflates backtests | High | ADR-016: point-in-time membership; residual bias measured and reported |
+| Survivorship bias inflates everything, not only backtests | High | ADR-016: membership is now point-in-time (413 departed names recovered from a free source; the geometry itself was previously drawn from survivors — 47% of the 2010 index was missing). Prices for departed names remain ~one-third retrievable; that residual is measured and reported |
+| Ticker used as identity | Medium, rising with each universe | ADR-023: `BK`→`BNY` has already been misread as a departure; permanent opaque keys before the second universe, not after |
 | Overfitting the parameter space | High | ADR-014 walk-forward + DSR + automatic trial counting |
 | Bad tick fabricates a dislocation | Medium | ADR-015 two-source validation + screens + timestamped cache |
 | Source breakage (esp. anything unofficial) | Medium-High | Yahoo chart endpoint is primary and unofficial (§7.2, revised M1) — the ADR-015 validation screens are the real defense here, not source diversity, since Stooq (the intended primary) is currently blocked outright and Tiingo isn't wired in yet |
 | FastMCD implementation difficulty | Medium | Phase-1 stand-in (shrunk covariance + MAD); MCD is its own milestone with published reference tests |
-| Crowding — residual reversion is well-trodden | Medium | Thin-margin expectation; costs modeled from day one |
+| Crowding — residual reversion is well-trodden | Medium | Thin-margin expectation; costs modeled from day one. PRIOR-ART.md §2: the RMT+PCA+OU stack is industry-standard and August 2007 shows crowding is a correlated-drawdown risk, not only a decay |
 | Viewer scope creep | Medium | Performance contract + four fixed tabs; anything else is phase 4+ |
 
 **The largest risk is still conceptual, not technical.** A rotating manifold with a red point outside it is persuasive independent of whether the trade makes money — and a native 60 fps viewer makes it *more* persuasive. ADR-013 exists so that persuasiveness never substitutes for evidence.
@@ -928,6 +966,12 @@ Performance contract: < 1 ms frame decode from the mapped run directory; 60 fps 
 6. MSVC↔GCC bit-reproducibility — same platform reproduces bit-identically (guaranteed); cross-platform is tolerance-based; goldens are per-platform if needed.
 7. Quarterly shelving in View D — **measured, and it matters more than "shelving" suggested.** The shelves are not merely steps: between filings *every* numerator is constant while the shared denominator (market cap) moves, so E/P and FCF/P are exactly proportional within a quarter and each shelf is a RAY through the origin rather than a plateau. A 756-day window is a fan of about twelve such rays, and it collapses toward a line whenever the cash-flow-to-earnings ratio is stable across them. Over 200730 windows on the full production run the median absolute correlation between the two axes is 0.73, the 90th percentile 0.988, and 9.5% exceed 0.99; 4.5% are singular enough that Mahalanobis and FastMCD both decline to fit while KDE, which inverts nothing, does not. So the answer is not a longer window — a longer window adds more nearly-parallel rays. It is a second axis with a DIFFERENT denominator, which means EBITDA/EV, at 53% ticker-day coverage against 77%. The run publishes the correlation so the choice is made on numbers.
 8. Cross-sectional valuation geometry — a valuation View A needs a sector normalization that ADR-022 deliberately does not choose. Revisit once View D has been measured on its own.
+9. **The matched control (ADR-013 amendment).** What characteristics to match on — the survey suggests date, sector, size, volatility and prior-move magnitude — and whether to use a calendar-time portfolio instead of clustered errors. Undecided; the highest-value open item in the project.
+10. **Does the embedding earn its keep (ADR-010 amendment)?** The Mahalanobis-on-residuals baseline has not been run.
+11. **RIE against shrink-then-clip (ADR-009 amendment).** Implemented as a flag or not yet at all; the comparison has not been made.
+12. **One geometry or one per universe (ADR-023).** Deliberately open until a second universe exists to test against.
+13. **Deeper excursions revert slower.** Measured, unexplained. Whether that is depth measuring news (news-driven excursions are both deeper and slower), the boundary being wrong in the tails, or a real property of dislocation size, is not known.
+14. **The hypothesis log.** `gm-sweep` counts sweep cells (ADR-014). Nobody counts *human* hypotheses — a new view, a new estimator, a new horizon grid — and without that count neither the deflated Sharpe nor any adjusted hurdle is computable. Whether to keep an append-only log, and where, is a process decision this document has not made.
 
 ---
 
@@ -942,9 +986,17 @@ Performance contract: < 1 ms frame decode from the mapped run directory; 60 fps 
 - **M6 — Depth (contingent on M4 passing).** FastMCD, Ripser lens + tear-veto, remaining viewer tabs (2D Pairs, 3D Sectors), learn panel with SEC profiles, ETF co-membership layer. *Exit: each lens either improves the reversion statistics or is documented as not doing so.*
 - **M7 — Hardening (contingent on M5 promise).** 10-K customer-graph parsing, paid point-in-time data decision (ADR-016), full-S&P-500 scale test, benchmark budget review.
 
+**Status against this plan, 2026-09-06.** M0–M7 are built and green (379 tests, three configurations, CI). The contingencies were **not honoured as written**: M6 and M7 were built before M4's gate was known to be passed, and it is now known that M4's exit criterion was not actually met at the time — the reversion study had no horizon and could not have answered "do excursions revert?" in any discriminating way. That is recorded here rather than re-ordered away. The gate stands **open**: the base rate is measured (ADR-013 amendment), the control is not. Nothing built in M5–M7 is invalidated by that — the backtest, valuation view and viewer are all instruments for the same research question — but no claim of predictive value is made anywhere in this repository, and none should be until the control exists.
+
+- **M8 — The gate, properly (next).** Matched control; name- and calendar-clustered inference with effective N reported; the same survival analysis on realised return net of costs; competing-risk accounting for delistings. *Exit: ADR-013 answered against a control, with the answer stated whichever way it falls.*
+- **M9 — Estimator questions the survey raised.** RIE behind a flag against shrink-then-clip; the no-manifold baseline; both compared on one run. *Exit: each either changes the M8 answer or is documented as not doing so.*
+- **M10 — Second universe.** ADR-023 identity; a `gm-universe`/`gm-ingest` adapter for one non-equity universe; per-universe normalisation; the shared-vs-separate geometry question tested rather than argued. *Exit: the pipeline runs end to end on a universe that rolls or never closes, and the geometry is inspectable in the viewer.*
+
 ---
 
 ## 14. References
+
+The survey in [PRIOR-ART.md](PRIOR-ART.md) carries the fuller list, including the negative results. These are the ones the original design rested on.
 
 - Mantegna (1999), *Hierarchical structure in financial markets* — correlation distance, MST.
 - Ledoit & Wolf (2004), *A well-conditioned estimator for large-dimensional covariance matrices*.

@@ -87,8 +87,9 @@ wrong: the error arrives 27 minutes in, after everything else has built.
 reports *"unable to find a build program corresponding to Ninja"*, pass
 `-DCMAKE_MAKE_PROGRAM=<path to ninja.exe>`.
 
-Both platforms are verified green at **347 tests**: `linux-gcc-release`,
-`linux-gcc-asan`, and `windows-msvc-release`.
+Both platforms are verified green at **379 tests**: `linux-gcc-release`,
+`linux-gcc-asan`, and `windows-msvc-release`, and CI runs all three on
+every push (`.github/workflows/ci.yml`) with a benchmark regression gate.
 
 ## Repository layout
 
@@ -241,7 +242,7 @@ ADR-013's reversion gate passes is a question about findings, not about
 code, and answering it here by implication would be exactly the kind of
 quiet overclaim the rest of this repo is written to avoid.
 
-**Test suite: 347 tests, green in `linux-gcc-release`, `linux-gcc-asan`
+**Test suite: 379 tests, green in `linux-gcc-release`, `linux-gcc-asan`
 and `windows-msvc-release`.** Every milestone below closes only on that
 set (ADR.md §13).
 
@@ -264,6 +265,7 @@ invocation, so it could never have reported it.
 | M5 — Backtest | Walk-forward engine, cost model, Deflated Sharpe, `gm-sweep` sharding |
 | M6 — Depth | FastMCD, tear veto, remaining viewer tabs, SEC company profiles, ETF co-membership |
 | M7 — Valuation | SEC XBRL tag chains measured against real filings, `fundamentals.parquet`, `valuation.parquet`, View D |
+| Since M7 (Sept 2026) | Valuation gate wired into the backtest and measured three ways; View C's boundary on `(z, ż)`; beta and idiosyncratic volatility, real; ADR-015's retroactive-change screen; point-in-time membership including departed names (ADR-016); the reversion study measured **within a horizon**, with censoring handled (ADR-013); CI, benchmarks with a machine-independent gate, and byte-identical determinism goldens (ADR-020) |
 
 ### The two views, on screen
 
@@ -372,6 +374,22 @@ Two further rules the chains follow, both learned from a real run:
   published by this date yet", because those call for different responses.
 
 ### Known gaps, stated plainly
+
+- **The gate is not passed, and this README does not claim it is.** The
+  reversion study now measures `P(reverted by H days)` per depth quartile
+  and per news condition, and the curves separate — deeper excursions
+  revert *slower*, and excursions with an 8-K in their span revert at 33%
+  by day five against 54% without. That is a base rate. It is not yet a
+  comparison against a matched control, which is what would show the
+  geometry adds anything beyond ordinary mean reversion; until it exists,
+  regression to the mean explains the whole table. ADR-013's amendment
+  lists the three things still required. ADR §13 records that later
+  milestones were built before this one was genuinely met.
+- **`gm-report` does not write the HTML report ADR-007 describes.** There
+  is no `gm-plot`; the stage writes `reversion_study.json` and
+  `excursions_tagged.parquet`. The viewer became the human-readable record
+  instead. ADR-007 is marked open rather than quietly retired.
+- **FRED is not ingested**, so the VIX overlay in the design is not drawn.
 
 - **EBITDA/EV is the weak axis and always will be.** Per ticker-day on the
   full 98-issuer run, of 341,358 days that have a market capitalisation:
