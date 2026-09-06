@@ -168,7 +168,60 @@ is built before the data is bought, not after.
 **Survivorship.** The same principle governs the universe itself
 (ADR-001, ADR-016): names are included for the period they were
 actually index members, not selected by who survived to today.
-Coverage gaps are a reported dataset statistic, not a silent omission.
+
+That was the intent from the start; for a while it was not what the
+code did. The universe came from the current-constituent table, which
+is correct about arrivals and blind to departures — a name dropped from
+the index in 2014 is not in the file at all, so it was missing from
+every historical day it belonged to. ADR-016 assigned that gap to a
+paid point-in-time vendor. The gap was real; the assignment was wrong.
+The index article's *revision history* is free, reaches back past 2010,
+and carries the full constituent table at every revision, so membership
+reconstructs from it directly (`tools/sp500_membership_history.py`):
+211 monthly revisions, 919 tickers ever a member, **413 of them gone
+from today's list**.
+
+What that was costing, per date — the universe as it was against the
+universe as it should have been:
+
+| Date | Was | Should have been | Missing |
+|---|---|---|---|
+| 2010-01-04 | 266 | 499 | 233 (47%) |
+| 2016-01-04 | 329 | 504 | 175 (35%) |
+| 2020-01-02 | 406 | 505 | 99 (20%) |
+| 2024-01-02 | 456 | 503 | 47 (9%) |
+| 2026-08-28 | 503 | 503 | 0 |
+
+In January 2010 the universe held 266 of the 499 names actually in the
+index, and every one of the 233 missing had later left — which is the
+population that drags returns down. Over the whole panel it is
+1,566,334 ticker-days against 2,106,845.
+
+413 is an upper bound, not a clean count: a ticker **rename** looks
+exactly like one name leaving and another arriving. Bank of New York
+Mellon became `BNY` in May 2026, so `BK` runs for 207 observations and
+then stops — which is also why the price source cannot retrieve it, the
+old symbol no longer resolving. A prefix sweep of the departed list
+turns up roughly twenty candidate pairs, several coincidental and the
+sweep missing `BK`→`BNY` itself, so renames are a few percent of the
+total rather than a large share. Both consequences run the conservative
+way: the gap is a little smaller than 413, and price coverage of
+departed names a little better than a third.
+
+**This is fixed for membership and not for prices.** Knowing PXD
+belonged in the 2015 universe does not produce its price series, and
+the free source mostly does not have it: of a 60-name sample of
+departed tickers, queried over a window when each was genuinely a
+member, about a third come back with a usable series
+(`tools/delisted_price_coverage.py`). So the denominator is now right
+and the residual is a measured coverage figure rather than an unknown —
+which is the difference between a bounded gap and a silent one, not
+between a gap and no gap.
+
+`gm-universe` writes `membership_source` into its manifest, so no
+artifact can look point-in-time when it is not, and rows for departed
+names carry `metadata_available = false` rather than a plausible-looking
+blank where their sector and CIK would be.
 
 ## Status
 

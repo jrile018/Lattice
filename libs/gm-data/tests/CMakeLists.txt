@@ -4,6 +4,7 @@ add_executable(gm-data-tests
   fundamentals_test.cpp
   fundamentals_concepts_test.cpp
   revisions_test.cpp
+  membership_test.cpp
 )
 
 target_link_libraries(gm-data-tests

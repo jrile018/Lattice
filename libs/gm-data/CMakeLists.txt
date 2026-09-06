@@ -3,6 +3,7 @@ add_library(gm-data STATIC
   src/liquidity.cpp
   src/fundamentals.cpp
   src/revisions.cpp
+  src/membership.cpp
 )
 add_library(gm::data ALIAS gm-data)
 

@@ -12,6 +12,10 @@ runs_base_dir = "runs"
 
 [universe]
 snapshot_csv = "data/reference/sp500_constituents.csv"
+# Point-in-time membership, including names the index has since dropped
+# (tools/sp500_membership_history.py). Comment this out to fall back to the
+# current-constituent snapshot, which cannot see departures.
+membership_csv = "data/reference/sp500_membership.csv"
 # 2010-01-04 is the earliest trading day this ADR's date range targets
 # (ADR-002); end_date is intentionally left a few days behind "today" to
 # avoid requesting a partial/not-yet-closed final bar.

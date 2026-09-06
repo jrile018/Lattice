@@ -302,6 +302,38 @@ If excursions do not revert materially better than the unconditional base rate, 
 
 **Amended (ADR-022 implementation).** That applies to *universe membership* and *delisted price history*, which remain the genuine gap. It does **not** extend to fundamentals: SEC XBRL carries real filing dates, so the fundamentals half of point-in-time discipline is already solved for free (§7.3, §6.6). The paid-source question is therefore narrower than this ADR originally implied — it is about prices and membership for names that left the index, not about knowing when a figure was published.
 
+**Amended again (2026-09-06) — membership does not need a paid source; prices still might.** The previous amendment left *membership* and *delisted prices* together as one paid-source problem. Measurement separates them, and the membership half turns out to be free.
+
+§7.1 recorded, correctly and by direct fetch, that the article's "selected changes" table is gone — re-verified on 2026-09-06, still gone. What that finding missed is that the article's **revision history** is free, reaches back past 2010, and each revision carries the full constituent table as it stood that day. Sampling it monthly reconstructs membership directly (`tools/sp500_membership_history.py`):
+
+| | |
+|---|---|
+| Revisions parsed | 211 (2008-12-31 … 2026-08-19), 0 skipped |
+| Tickers ever a member | 919 |
+| In the index today | 503 |
+| **Departed — the survivorship gap** | **413** |
+
+The size of what was being lost, per date, comparing the current-snapshot universe against the reconstructed one:
+
+| Date | Snapshot universe | Point-in-time | Missing |
+|---|---|---|---|
+| 2010-01-04 | 266 | 499 | 233 (47%) |
+| 2013-01-02 | 298 | 500 | 202 (40%) |
+| 2016-01-04 | 329 | 504 | 175 (35%) |
+| 2020-01-02 | 406 | 505 | 99 (20%) |
+| 2024-01-02 | 456 | 503 | 47 (9%) |
+| 2026-08-28 | 503 | 503 | 0 |
+
+In January 2010 the universe held 266 of the 499 names actually in the index, and every one of the 233 missing is a name that later left — the exact population that drags returns down. Across the panel it is 1,566,334 ticker-days against 2,106,845, a quarter of the universe absent.
+
+**What the free source does not fix.** Membership is only half. A name in the universe with no price series is a hole, not a tradable name, and the price source is a separate question — asked directly rather than assumed (`tools/delisted_price_coverage.py`): of a 60-name sample of departed tickers, queried over a window in which each was genuinely a member, **only about a third come back with a usable series**. That shortfall is the honest remaining scope of this ADR, and it is narrower than "survivorship": the *denominator* is now correct and reported, so the residual is a measured coverage figure rather than an unknown.
+
+**Consequences.** `gm-universe` gains `universe.membership_csv`. Set, it emits point-in-time membership including departed names; unset, it falls back to the current snapshot so runs that predate the history file still reproduce, and the manifest records which was used (`membership_source`) together with `tickers_departed` and the row counts that lack metadata. Departed names have no security name, sector or CIK in the current table, so those rows carry `metadata_available = false` rather than a plausible-looking blank — a downstream stage that needs a CIK can refuse loudly instead of treating an unknown name as a known one.
+
+**What 413 is and is not.** It is an upper bound on genuine departures. A ticker **rename** is indistinguishable, in this data, from one name leaving and another arriving: Bank of New York Mellon became `BNY` in May 2026, so `BK` appears in 207 observations and then stops, exactly as a removal would — which is also why the price probe could not retrieve it, the old symbol no longer resolving. A prefix-matching sweep of the departed list finds around twenty candidate pairs (`AOC`→`AON`, `CBG`→`CBRE`, `RTN`→`RTX`, `WMI`→`WM`, …), several of them coincidences and the sweep missing `BK`→`BNY` entirely, so the true rename count is on the order of a few percent of 413 rather than a large fraction of it. Two consequences, both in the conservative direction for the claims made here: the survivorship gap is slightly smaller than 413, and the measured price coverage of departed names is slightly better than a third, since a renamed symbol counts as unretrievable. Resolving renames needs a name- or CIK-based join the constituent table does not carry for names it no longer lists, which is a genuine limit of the free source rather than a shortcut taken here.
+
+**On sampling monthly.** Index changes are announced in advance and take effect on a known date, so monthly sampling can misdate a join or a removal by up to a month. That is a real limitation, and much smaller than the one it replaces: being three weeks wrong about a join date is not comparable to a name being absent from sixteen years of history. The observation date each answer came from is in the file, so the uncertainty is visible rather than implied.
+
 ---
 
 ### ADR-017 — Artifacts: Parquet + JSON manifests, immutable, schema-versioned
@@ -465,7 +497,7 @@ Unlike §6.3's feature vector, `v` is **not** cross-sectionally standardized. St
 
 | Source | Access | Cost | Notes |
 |---|---|---|---|
-| S&P 500 current constituents + join date | `en.wikipedia.org/wiki/List_of_S%26P_500_companies` | Free | **Amended during M1 (2026-08-30).** The ADR originally assumed this page carries a separate "changes" table (additions/removals with dates) sufficient for full point-in-time reconstruction. As of the live page fetched during M1, that table is no longer present — verified by direct fetch, not assumed from memory (`data/raw/sp500_wikipedia.html`, retrieved 2026-08-30). What the page *does* still provide, and what M1 actually uses: a 503-row current-constituent table with a `Date added` column per member, snapshotted to `data/reference/sp500_constituents.csv`. This answers "was ticker X a member on date D" correctly for any name still in the index today (`D >= date_added`). It cannot answer that question for a name that was **removed** from the index before today — that gap is real, but it is not new: it is the same survivorship gap ADR-016 already scoped and already assigned to a paid point-in-time source (Sharadar/Norgate/CRSP) as a later-phase decision. This finding sharpens ADR-016's estimate rather than contradicting it. |
+| S&P 500 current constituents + join date | `en.wikipedia.org/wiki/List_of_S%26P_500_companies` | Free | **Amended during M1 (2026-08-30).** The ADR originally assumed this page carries a separate "changes" table (additions/removals with dates) sufficient for full point-in-time reconstruction. As of the live page fetched during M1, that table is no longer present — verified by direct fetch, not assumed from memory (`data/raw/sp500_wikipedia.html`, retrieved 2026-08-30). What the page *does* still provide, and what M1 actually uses: a 503-row current-constituent table with a `Date added` column per member, snapshotted to `data/reference/sp500_constituents.csv`. This answers "was ticker X a member on date D" correctly for any name still in the index today (`D >= date_added`). It cannot answer that question for a name that was **removed** from the index before today — that gap is real, but it is not new: it is the same survivorship gap ADR-016 already scoped and already assigned to a paid point-in-time source (Sharadar/Norgate/CRSP) as a later-phase decision. This finding sharpens ADR-016's estimate rather than contradicting it. **Superseded in part (2026-09-06):** the changes table is indeed gone, but the article's *revision history* is free and carries the full constituent table at every revision, so point-in-time membership **is** recoverable without a paid source — 211 monthly revisions, 919 tickers ever a member, 413 departed (`tools/sp500_membership_history.py`, `data/reference/sp500_membership.csv`). Delisted *prices* remain the genuine paid-source question; see ADR-016. |
 | Nasdaq-100 membership | ~~Wikipedia~~ deferred | Free (source TBD) | **Amended during M1.** Same live-fetch check found no components table on the current Nasdaq-100 Wikipedia page either (no dedicated "List of Nasdaq-100 companies" article exists as a fallback). Rather than force a fragile scrape against a page that clearly reorganizes over time, this is deferred: **M1's base pool is S&P 500 current constituents only**, explicitly narrower than ADR-001's original `S&P 500 ∪ Nasdaq-100 ∪ manual list`. Nasdaq's own official listings page is the more likely durable free source and is the next thing to try when this is revisited, not another Wikipedia scrape. |
 | Ticker → CIK map | `www.sec.gov/files/company_tickers.json` | Free | Official; handles ticker changes; joins prices to filings. |
 | Liquidity ranking | Computed | Free | Trailing 60-day median dollar volume from the price panel itself. |
