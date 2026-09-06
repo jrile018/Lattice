@@ -226,6 +226,14 @@ Each stage: reads one TOML config + upstream artifacts, validates schema version
 
 **Rejected.** Raw Pearson (unstable). EWMA-only (kept as an alternative estimator flag, insufficient alone at this q).
 
+**Amended (2026-09-06) — the two cleaning steps are alternatives, not a sequence.** Shrinkage and MP clipping are not complementary stages of one procedure; they are competing estimators of the same corrected eigenvalue spectrum, and neither derivation assumes the other has already run. Linear shrinkage moves every eigenvalue by a common factor. The true bias is eigenvalue-dependent — larger eigenvalues biased up, smaller ones down, by different amounts — which is what clipping crudely approximates and what nonlinear shrinkage solves properly. Applying both in series is not a belt-and-braces improvement; it is two corrections for one bias, interacting in a way neither paper analyses.
+
+Current best practice is a single **rotationally-invariant estimator** — Bun, Bouchaud & Potters, *Cleaning Large Correlation Matrices* (Physics Reports 666, 2017), or equivalently Ledoit & Wolf's analytic nonlinear shrinkage (2017). The comparative literature ranks them: raw sample < linear Ledoit–Wolf ≈ MP clipping < nonlinear shrinkage/RIE, with the gap widening as `q = N/W` grows. At N=100, W=60 — and worse at the 500–900 name cross-section — that is squarely the regime where the difference is largest.
+
+One consequence is specific to this project rather than general. RIE deliberately corrects **only the eigenvalues and keeps the empirical eigenvectors**, because eigenvector instability under sampling noise is a separate and independently damaging error that no eigenvalue correction addresses. Classical MDS (ADR-010) builds its coordinates out of precisely those eigenvectors, so the geometry inherits that instability whatever the cleaning does.
+
+**Decision.** Implement RIE as a third estimator and make it the default for geometry, retaining the current shrink-then-clip path behind a config flag so the two can be compared on the same run rather than argued about. Until that comparison exists this remains the documented state, not a silent switch. See [PRIOR-ART.md](PRIOR-ART.md) §3.1.
+
 ---
 
 ### ADR-010 — Embeddings: classical MDS, Procrustes-aligned across frames
@@ -237,6 +245,12 @@ Each stage: reads one TOML config + upstream artifacts, validates schema version
 A tested in-house **NYSE trading calendar** (holidays + half-days, 2010→present, from published exchange history) underlies all windowing; day-count bugs are the quietest way to corrupt every downstream number.
 
 **Rejected.** UMAP/t-SNE (stochastic, globally distorting, frame-unstable — and no C++ implementation worth trusting for scored output).
+
+**Amended (2026-09-06) — what the embedding is for, and the baseline it has to beat.** Classical MDS on a correlation-distance matrix is mathematically close to PCA on the same matrix: both are eigendecompositions of a related Gram matrix. The survey in [PRIOR-ART.md](PRIOR-ART.md) §3.2 found **no published evidence that embedding into geometric coordinates adds predictive information beyond what the cleaned eigenstructure already contains.** The correlation-network literature (Mantegna, Onnela, Tumminello) demonstrates the descriptive value of low-dimensional geometric views — sector recovery, crisis contraction — and essentially nothing about predictive value; MST-derived portfolio strategies characteristically fit in-sample and fail out of it.
+
+This is not an argument against the embedding or the viewer. A diagnostic a human can read is a real deliverable (ADR-018), and the geometry is what makes the structure legible at all. It is an argument against assuming the embedding is where the signal lives, which nothing here has yet shown.
+
+**Decision.** Before any claim that the geometry carries information, run the null it has to beat: **Mahalanobis distance on RMT-cleaned factor residuals, with no MDS and no Procrustes step** — same universe, window, boundary logic and horizon measurement (ADR-013). If the embedded version does not beat that out of sample, the embedding is earning its keep as a visualisation rather than as signal, and the README and any internal description say so.
 
 ---
 
@@ -278,7 +292,34 @@ Scope: the veto is **entry-gated only** - it blocks a candidate whose excursion 
 
 If excursions do not revert materially better than the unconditional base rate, the geometry ships as a visualization tool and **is not traded**. That outcome is explicitly acceptable.
 
+
+**Amended (2026-09-06) — the horizon was specified here and lost in implementation.** This ADR asks for `P(point returns inside within H days | exit depth >= d)`. `gm-report` dropped the `within H days` and reported the fraction of excursions whose `reverted` flag was true. That flag is set in `libs/gm-signals/include/gm-signals/excursion.hpp` and means *closed before the price series ran out* — no horizon at all. Over sixteen years a rolling-window z-score essentially always crosses back eventually, so the study reported **99.8% in every bucket**: overall, in all four peak-depth quartiles, with earnings and without. A figure that flat across every conditioning variable is a property of the definition, not a fact about markets, and "it comes back eventually" is neither tradable nor interesting.
+
+Measured with the horizon restored — Kaplan–Meier per bucket, 7,110 excursions, run `pit-survivorship`:
+
+| Bucket | n | Median | H=5 | H=10 | H=20 | H=40 |
+|---|---|---|---|---|---|---|
+| q1 shallowest | 1777 | 4 d | 61% | 86% | 98% | 100% |
+| q2 | 1777 | 6 d | 48% | 77% | 96% | 100% |
+| q3 | 1777 | 7 d | 37% | 67% | 94% | 100% |
+| q4 deepest | 1779 | 8 d | 35% | 66% | 92% | 100% |
+| without earnings/8-K | 4053 | 5 d | 54% | 82% | 98% | 100% |
+| with earnings/8-K | 3057 | 8 d | 33% | 63% | 92% | 100% |
+
+Two things the horizonless measure could not see. Depth orders the curves monotonically and **in the opposite direction to the naive thesis** — deeper excursions revert *slower*, not harder, with non-overlapping intervals. And the news split is as large as the depth split, which is ADR-022's argument appearing as a number for the first time. Everything reverts by day 40 regardless, which is exactly why the old measure said nothing.
+
+**Kaplan–Meier rather than a count**, because excursions still outside the band when the data ends are right-censored. Counting them as failures invents outcomes never observed; dropping them biases the other way, since an episode is censored precisely because it was still dislocated. Here it is 13 of 7,110, so it barely moves these numbers — it is in for correctness, not effect. `libs/gm-signals/survival.hpp`, nine tests, the first against the published Freireich 6-MP example.
+
+**What this is still not.** A base rate is not an edge, and the gate is not passed. Three things are required before any claim of predictive value, in order (see [PRIOR-ART.md](PRIOR-ART.md) §6):
+
+1. **A matched control** — same day, similar size, sector, volatility, and similar magnitude of prior move, differing only in whether the boundary flagged it. Selecting on an extreme value of a noisy statistic produces apparent reversion under a true null, so without a control that also just moved a lot, plain regression to the mean is an unexcluded explanation of the entire table above.
+2. **Dependence-corrected inference** — excursions for one ticker overlap and cluster heavily in calendar time. Cluster by name and calendar block, or use a calendar-time portfolio, and report effective N beside the episode count.
+3. **The same analysis on realised return**, net of costs, not only on the indicator. A z-score can cross back because its own denominator moved. A detector that scores on the indicator and not on the return is measuring its own definition.
+
+Also unaddressed: a delisting or acquisition is a **competing risk**, not ordinary censoring — a name dislocated because it is a takeover target will never revert, and treating that as censoring assumes an independence that is false.
+
 ---
+
 
 ### ADR-014 — Walk-forward only, Deflated Sharpe mandatory
 
@@ -415,6 +456,26 @@ In January 2010 the universe held 266 of the 499 names actually in the index, an
 - What it does not buy: a cross-sectional valuation geometry. Comparing yields *across* names requires a sector-normalization decision (a software company's steady-state `E/P` is not a utility's), and making that decision badly would produce a figure that looks informative and encodes only industry membership. Deferred until View D has been measured on its own.
 - Fundamentals quality has no free two-source check. ADR-015's two-source price validation has no analogue here; SEC XBRL is authoritative but its tags are applied inconsistently across filers, so per-field coverage becomes a reported dataset statistic in the manner of ADR-016.
 - With an estimated `available_date`, any edge measured from View D is **not evidence**. This ADR is explicitly build-the-machinery-now, buy-the-data-later; the machinery is testable without the data, the conclusions are not.
+
+---
+
+### ADR-023 — Instrument identity is a permanent opaque key, not a ticker
+
+**Context.** Every stage keys on the ticker string. That is only correct for a universe of perpetual, single-venue, single-currency instruments — US equities, and not even reliably those. It has already produced a wrong answer: `BK` became `BNY` in May 2026, and the membership reconstruction (ADR-016) read one name leaving and another arriving, which is also why the price probe could not retrieve `BK` for a window in which the company was plainly listed.
+
+Adding a second asset class makes this structural rather than occasional. A futures contract has a finite life and a roll; an option expires; a crypto asset trades on several venues at once under near-identical symbols. Retrofitting identity after the fact means rewriting every artifact ever produced, which is the migration this decision exists to avoid.
+
+**Decision.** Introduce a permanent, opaque instrument key, assigned once and never reused, distinct from three things it is routinely confused with:
+
+- the **display symbol**, which changes;
+- the **venue-native symbol**, which differs per venue and must be preserved verbatim for wire calls (the Nautilus pattern);
+- the **continuous series**, which is a modelling choice, not an instrument — a back-adjusted and a ratio-adjusted front-month series are two different objects built from the same contract chain, and neither is the chain.
+
+Where OpenFIGI covers an instrument, use the FIGI: FIGIs never change and are never reused, persist through corporate actions, and are retired rather than recycled. Where it does not, generate a key locally. Ticker-at-a-date resolves to the key through a dated mapping (the LEAN map-file pattern), so historical answers stay correct as symbols change.
+
+**Consequences.** Finite-life instruments are modelled as a **chain**: a logical continuous instrument referencing an ordered sequence of physical contracts, each with its own key, roll date and adjustment factor. The continuous series does not get a permanent key of its own, precisely because the adjustment method is a choice that should be revisable without invalidating downstream identity. Return-based work (correlation, geometry) reads the ratio-adjusted series; anything touching settlement or margin reads the raw per-contract series. One series cannot serve both, and naive front-month concatenation puts a price jump at every roll — which this system would faithfully flag as a dislocation.
+
+**Not decided here.** Whether asset classes share one geometry. The survey ([PRIOR-ART.md](PRIOR-ART.md) §5) argues against a single flat embedding as the first step, on two grounds: without per-class normalisation it would largely rediscover asset-class membership, and cross-asset dependence structure reorganises under stress — exactly when the flag is meant to be trustworthy. The shape indicated is one geometry per universe plus a coarser cross-universe layer, treated as lower-confidence by construction. That is a design note, not yet a decision.
 
 ---
 

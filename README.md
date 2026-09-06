@@ -2,7 +2,17 @@
 
 Geometric market manifold — equity relationship geometry for statistical
 arbitrage. See [ADR.md](ADR.md) for the full design (data sources, math,
-architecture, milestones). This file is the quickstart.
+architecture, milestones) and [PRIOR-ART.md](PRIOR-ART.md) for what has
+already been tried in this space, what the evidence supports, and what it
+does not. This file is the quickstart.
+
+The instrument's purpose, stated once so it is not inferred from whichever
+number happens to be in front of you: this is a **research instrument for
+finding candidate dislocations geometrically**, not a trading strategy.
+The measurement that decides whether it works is ADR-013's reversion base
+rate conditioned on depth and on news — not a backtest Sharpe ratio, which
+comes from a crude execution model over a small number of positions and is
+reported as a supporting check with its sample size attached.
 
 ## Prerequisites
 
